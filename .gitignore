@@ -1,0 +1,12 @@
+# build output
+/bin/
+/old/
+
+# test artifacts
+*.test
+*.out
+coverage.*
+
+# planning
+*.md
+!README.md
