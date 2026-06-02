@@ -10,11 +10,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func TestConnect_Integration(t *testing.T) {
@@ -58,7 +60,12 @@ func TestConnect_Integration(t *testing.T) {
 		t.Fatalf("split addr: %v", err)
 	}
 	target := Target{User: "tester", Host: host, Port: port}
-	cfg := Config{DisableAgent: true, KeyPath: keyPath}
+	cfg := Config{
+		DisableAgent:   true,
+		KeyPath:        keyPath,
+		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
+		HostKeyPrompt:  func(string, string) (bool, error) { return true, nil }, // accept on first use
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -80,6 +87,64 @@ func TestConnect_Integration(t *testing.T) {
 	case <-srvDone:
 	case <-time.After(3 * time.Second):
 		t.Fatalf("server goroutine did not exit after client close")
+	}
+}
+
+func TestConnect_HostKeyMismatch(t *testing.T) {
+	hostSigner, _ := newSigner(t)
+	clientSigner, clientPriv := newSigner(t)
+
+	srvCfg := &ssh.ServerConfig{
+		PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
+			if string(k.Marshal()) == string(clientSigner.PublicKey().Marshal()) {
+				return &ssh.Permissions{}, nil
+			}
+			return nil, errors.New("unauthorized")
+		},
+	}
+	srvCfg.AddHostKey(hostSigner)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go serveOne(t, ln, srvCfg)
+
+	der, _ := x509.MarshalPKCS8PrivateKey(clientPriv)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	keyPath := filepath.Join(t.TempDir(), "id")
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	addr := net.JoinHostPort(host, port)
+
+	// Pre-seed known_hosts with the WRONG key for this address.
+	wrongKey := genHostKey(t)
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize(addr)}, wrongKey)
+	if err := os.WriteFile(khPath, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+
+	cfg := Config{
+		DisableAgent:   true,
+		KeyPath:        keyPath,
+		KnownHostsPath: khPath,
+		HostKeyPrompt: func(string, string) (bool, error) {
+			t.Error("prompt must not be called on a mismatch")
+			return true, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := Connect(ctx, Target{User: "tester", Host: host, Port: port}, cfg); err == nil {
+		t.Fatal("Connect accepted a mismatched host key, want refusal")
+	} else if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error %q does not identify a host key mismatch", err)
 	}
 }
 

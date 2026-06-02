@@ -30,6 +30,12 @@ func Connect(ctx context.Context, t Target, cfg Config) (*Session, error) {
 		return nil, err
 	}
 
+	hostKeyCB, err := loadHostKeyCallback(cfg.KnownHostsPath, cfg.HostKeyPrompt)
+	if err != nil {
+		closeAll(closers)
+		return nil, err
+	}
+
 	addr := net.JoinHostPort(t.Host, resolvePort(t, cfg))
 
 	var d net.Dialer
@@ -40,10 +46,9 @@ func Connect(ctx context.Context, t Target, cfg Config) (*Session, error) {
 	}
 
 	clientCfg := &ssh.ClientConfig{
-		User: t.User,
-		Auth: methods,
-		// TODO(M6): replace with knownhosts.New from golang.org/x/crypto/ssh/knownhosts.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User:            t.User,
+		Auth:            methods,
+		HostKeyCallback: hostKeyCB,
 	}
 	cConn, chans, reqs, err := ssh.NewClientConn(rawConn, addr, clientCfg)
 	if err != nil {

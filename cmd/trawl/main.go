@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,12 +46,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		keyFlag        = fset.String("key", "", "private key file (otherwise the SSH agent is used)")
 		passwordFlag   = fset.Bool("password", true, "allow password authentication as a fallback")
 		noPasswordFlag = fset.Bool("no-password", false, "disable the password fallback")
-		knownHosts     = fset.String("known-hosts", defaultKnownHosts(), "known_hosts file (used from M6)")
+		knownHosts     = fset.String("known-hosts", defaultKnownHosts(), "known_hosts file")
 		configPath     = fset.String("config", defaultConfigPath(), "config file path")
 		setup          = fset.Bool("setup", false, "run the interactive setup wizard and exit")
 		showVersion    = fset.Bool("version", false, "print version and exit")
 	)
-	_ = knownHosts // TODO(M6): feed into the host-key callback.
 
 	switch err := fset.Parse(args); {
 	case errors.Is(err, flag.ErrHelp):
@@ -110,6 +111,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if wantPassword {
 		cfg.PasswordPrompt = passwordPrompt
 	}
+	cfg.KnownHostsPath = *knownHosts
+	cfg.HostKeyPrompt = hostKeyPrompt
 
 	if err := connectAndServe(target, cfg); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -209,6 +212,24 @@ func connectAndServe(target sshx.Target, cfg sshx.Config) error {
 
 	_, err = p.Run()
 	return err
+}
+
+// hostKeyPrompt asks the user, on a first connection, whether to trust an
+// unknown host key. It runs before the TUI takes over the screen.
+func hostKeyPrompt(host, fingerprint string) (bool, error) {
+	fmt.Fprintf(os.Stderr, "The authenticity of host %q can't be established.\n", host)
+	fmt.Fprintf(os.Stderr, "Key fingerprint is %s.\n", fingerprint)
+	fmt.Fprint(os.Stderr, "Add to known_hosts? [y/N]: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // passwordPrompt reads a password from the controlling terminal without echo.

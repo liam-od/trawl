@@ -26,6 +26,14 @@ type Config struct {
 	// expected to read from a controlling terminal (e.g. golang.org/x/term.ReadPassword).
 	PasswordPrompt func() (string, error)
 
+	// KnownHostsPath names the known_hosts file used to verify the server's host key. It is
+	// required: Connect refuses to dial without it (there is no insecure bypass).
+	KnownHostsPath string
+
+	// HostKeyPrompt, when non-nil, is consulted to trust an unknown host on first use. A nil
+	// prompt means unknown hosts are refused rather than silently trusted.
+	HostKeyPrompt PromptFunc
+
 	dialAgent func() (agent.Agent, io.Closer, error)
 	readKey   func(path string) ([]byte, error)
 }
