@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 
+	"github.com/liam-od/trawl/internal/config"
 	"github.com/liam-od/trawl/internal/fs"
 	"github.com/liam-od/trawl/internal/sshx"
 	"github.com/liam-od/trawl/internal/ui"
@@ -38,13 +39,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fset.Usage = func() { fmt.Fprint(stderr, usageText) }
 
 	var (
-		port        = fset.Int("port", 0, "SSH port (overrides :port in the target; default 22)")
-		user        = fset.String("user", "", "override the user in the target")
-		keyPath     = fset.String("key", "", "private key file (otherwise the SSH agent is used)")
-		password    = fset.Bool("password", true, "allow password authentication as a fallback")
-		noPassword  = fset.Bool("no-password", false, "disable the password fallback")
-		knownHosts  = fset.String("known-hosts", defaultKnownHosts(), "known_hosts file (used from M6)")
-		showVersion = fset.Bool("version", false, "print version and exit")
+		portFlag       = fset.Int("port", 0, "SSH port (overrides :port in the target; default 22)")
+		userFlag       = fset.String("user", "", "override the user in the target")
+		keyFlag        = fset.String("key", "", "private key file (otherwise the SSH agent is used)")
+		passwordFlag   = fset.Bool("password", true, "allow password authentication as a fallback")
+		noPasswordFlag = fset.Bool("no-password", false, "disable the password fallback")
+		knownHosts     = fset.String("known-hosts", defaultKnownHosts(), "known_hosts file (used from M6)")
+		configPath     = fset.String("config", defaultConfigPath(), "config file path")
+		setup          = fset.Bool("setup", false, "run the interactive setup wizard and exit")
+		showVersion    = fset.Bool("version", false, "print version and exit")
 	)
 	_ = knownHosts // TODO(M6): feed into the host-key callback.
 
@@ -57,6 +60,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if *showVersion {
 		fmt.Fprintf(stdout, "trawl %s\n", version)
+		return 0
+	}
+
+	if *setup {
+		if err := config.RunSetup(os.Stdin, stdout, *configPath); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 		return 0
 	}
 
@@ -73,17 +84,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fset.Usage()
 		return 1
 	}
-	if *user != "" {
-		target.User = *user
-	}
-	if target.User == "" {
-		fmt.Fprintln(stderr, "error: no user given; target must be user@host[:port][:/path]")
-		fset.Usage()
+
+	fileCfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	cfg := sshx.Config{Port: *port, KeyPath: *keyPath}
-	if *password && !*noPassword {
+	set := map[string]bool{}
+	fset.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+
+	target, cfg, wantPassword, err := mergeSettings(target, fileCfg, cliFlags{
+		port:       *portFlag,
+		user:       *userFlag,
+		key:        *keyFlag,
+		password:   *passwordFlag,
+		noPassword: *noPasswordFlag,
+		set:        set,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		fset.Usage()
+		return 1
+	}
+	if wantPassword {
 		cfg.PasswordPrompt = passwordPrompt
 	}
 
@@ -92,6 +116,58 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// cliFlags carries the parsed flag values plus the set of flag names the user
+// actually passed, so mergeSettings can apply the precedence CLI > config >
+// default.
+type cliFlags struct {
+	port       int
+	user       string
+	key        string
+	password   bool
+	noPassword bool
+	set        map[string]bool
+}
+
+// mergeSettings resolves the target user and connection config from the parsed
+// target, the config file, and the CLI flags, applying the order: explicit CLI
+// flag > config file > built-in default. It returns the resolved target, the
+// sshx.Config (without PasswordPrompt), and whether password auth should be
+// offered. An empty resolved user is an error.
+func mergeSettings(target sshx.Target, fileCfg config.File, f cliFlags) (sshx.Target, sshx.Config, bool, error) {
+	if f.set["user"] {
+		target.User = f.user
+	}
+	if target.User == "" {
+		target.User = fileCfg.DefaultUser
+	}
+	if target.User == "" {
+		return target, sshx.Config{}, false,
+			errors.New("no user given; pass user@host, --user, or set default_user via --setup")
+	}
+
+	// Port precedence: --port > target :port > config default_port > 22.
+	// Leaving cfg.Port at 0 defers to sshx.resolvePort, which then prefers the
+	// target's own port. So config's default only applies when the target
+	// carries no explicit port.
+	port := 0
+	switch {
+	case f.set["port"]:
+		port = f.port
+	case target.Port == "":
+		port = fileCfg.DefaultPort
+	}
+	key := fileCfg.KeyPath
+	if f.set["key"] {
+		key = f.key
+	}
+	password := fileCfg.PasswordFallback
+	if f.set["password"] || f.set["no-password"] {
+		password = f.password && !f.noPassword
+	}
+
+	return target, sshx.Config{Port: port, KeyPath: key}, password, nil
 }
 
 // connectAndServe opens the SSH/SFTP session and runs the TUI until the user
@@ -156,6 +232,16 @@ func defaultKnownHosts() string {
 	return filepath.Join(home, ".ssh", "known_hosts")
 }
 
+// defaultConfigPath returns the config file location, or an empty string if it
+// can't be determined.
+func defaultConfigPath() string {
+	p, err := config.DefaultPath()
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
 const usageText = `usage: trawl [flags] user@host[:port][:/remote/path]
 
 A dual-pane terminal SFTP file manager.
@@ -167,6 +253,10 @@ Flags:
   --password        allow password authentication as a fallback (default true)
   --no-password     disable the password fallback
   --known-hosts P   known_hosts file (default ~/.ssh/known_hosts)
+  --config PATH     config file (default ~/.config/trawl/config.json)
+  --setup           run the interactive setup wizard and exit
   --version         print version and exit
   --help            show this help and exit
+
+Connection settings resolve as: CLI flag > config file > built-in default.
 `
