@@ -15,91 +15,93 @@ import (
 	"github.com/liam-od/trawl/internal/transfer"
 )
 
+// collectProgress drains a progress channel into a slice. The returned finish
+// closes the channel and returns everything received.
+func collectProgress() (chan transfer.CopyProgressMsg, func() []transfer.CopyProgressMsg) {
+	progress := make(chan transfer.CopyProgressMsg, 1024)
+	done := make(chan []transfer.CopyProgressMsg, 1)
+	go func() {
+		var msgs []transfer.CopyProgressMsg
+		for p := range progress {
+			msgs = append(msgs, p)
+		}
+		done <- msgs
+	}()
+	return progress, func() []transfer.CopyProgressMsg {
+		close(progress)
+		return <-done
+	}
+}
+
+// assertProgress checks the samples are monotonic in Written and end at total.
+func assertProgress(t *testing.T, msgs []transfer.CopyProgressMsg, total int64) {
+	t.Helper()
+	if len(msgs) == 0 {
+		t.Fatal("no progress samples received")
+	}
+	prev := int64(0)
+	for i, m := range msgs {
+		if m.Written < prev {
+			t.Fatalf("written not monotonic at %d: %d after %d", i, m.Written, prev)
+		}
+		prev = m.Written
+	}
+	if last := msgs[len(msgs)-1].Written; last != total {
+		t.Errorf("final written = %d, want %d", last, total)
+	}
+}
+
+func randBytes(t *testing.T, n int) []byte {
+	t.Helper()
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	return b
+}
+
 func TestCopyLocalToLocal(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "src.bin")
 	dstPath := filepath.Join(dir, "dst.bin")
-
-	// A few read buffers' worth so progress fires more than once.
-	want := make([]byte, 256*1024)
-	if _, err := rand.Read(want); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	want := randBytes(t, 256*1024)
 	if err := os.WriteFile(srcPath, want, 0o644); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 
-	progress := make(chan int64, 1024)
-	collected := make(chan []int64, 1)
-	go func() {
-		var samples []int64
-		for v := range progress {
-			samples = append(samples, v)
-		}
-		collected <- samples
-	}()
-
+	progress, finish := collectProgress()
 	local := fs.NewLocal()
 	if err := transfer.Copy(context.Background(), local, srcPath, local, dstPath, progress); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
-	close(progress)
-	samples := <-collected
+	msgs := finish()
 
 	got, err := os.ReadFile(dstPath)
 	if err != nil {
 		t.Fatalf("read dst: %v", err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("destination bytes differ from source (%d vs %d bytes)", len(got), len(want))
+		t.Fatalf("destination bytes differ (%d vs %d)", len(got), len(want))
 	}
-
-	if len(samples) == 0 {
-		t.Fatal("progress channel received no samples")
-	}
-	prev := int64(0)
-	for i, v := range samples {
-		if v < prev {
-			t.Fatalf("progress not monotonic at %d: %d after %d", i, v, prev)
-		}
-		prev = v
-	}
-	if last := samples[len(samples)-1]; last != int64(len(want)) {
-		t.Errorf("final progress = %d, want %d", last, len(want))
-	}
+	assertProgress(t, msgs, int64(len(want)))
 }
 
 func TestCopyDownloadReportsProgress(t *testing.T) {
-	// Exercises the SFTP-source (download) path, which counts on the writer side
-	// so sftp.File.WriteTo's concurrent reads stay in play.
+	// SFTP source (download) path — counts on the writer so sftp.File.WriteTo's
+	// concurrent reads stay in play.
 	dir := t.TempDir()
 	remotePath := filepath.Join(dir, "remote.bin")
 	localPath := filepath.Join(dir, "local.bin")
-
-	want := make([]byte, 256*1024)
-	if _, err := rand.Read(want); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	want := randBytes(t, 256*1024)
 	if err := os.WriteFile(remotePath, want, 0o644); err != nil {
 		t.Fatalf("write remote: %v", err)
 	}
 
-	progress := make(chan int64, 1024)
-	collected := make(chan []int64, 1)
-	go func() {
-		var samples []int64
-		for v := range progress {
-			samples = append(samples, v)
-		}
-		collected <- samples
-	}()
-
-	remote := newTestSFTP(t)
-	if err := transfer.Copy(context.Background(), remote, remotePath, fs.NewLocal(), localPath, progress); err != nil {
+	progress, finish := collectProgress()
+	if err := transfer.Copy(context.Background(), newTestSFTP(t), remotePath, fs.NewLocal(), localPath, progress); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
-	close(progress)
-	samples := <-collected
+	msgs := finish()
 
 	got, err := os.ReadFile(localPath)
 	if err != nil {
@@ -108,53 +110,26 @@ func TestCopyDownloadReportsProgress(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("downloaded bytes differ (%d vs %d)", len(got), len(want))
 	}
-	if len(samples) == 0 {
-		t.Fatal("download reported no progress samples")
-	}
-	prev := int64(0)
-	for i, v := range samples {
-		if v < prev {
-			t.Fatalf("progress not monotonic at %d: %d after %d", i, v, prev)
-		}
-		prev = v
-	}
-	if last := samples[len(samples)-1]; last != int64(len(want)) {
-		t.Errorf("final progress = %d, want %d", last, len(want))
-	}
+	assertProgress(t, msgs, int64(len(want)))
 }
 
 func TestCopyUploadReportsProgress(t *testing.T) {
-	// Exercises the SFTP-destination (upload) path: the local source is wrapped
-	// in a countingReader, which both tracks progress and hides os.File.WriteTo
-	// so io.Copy uses sftp.File.ReadFrom's concurrent writes.
+	// SFTP destination (upload) path — the local source is wrapped in a
+	// countingReader, hiding os.File.WriteTo so sftp.File.ReadFrom's concurrent
+	// writes run.
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "local.bin")
 	remotePath := filepath.Join(dir, "remote.bin")
-
-	want := make([]byte, 256*1024)
-	if _, err := rand.Read(want); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	want := randBytes(t, 256*1024)
 	if err := os.WriteFile(localPath, want, 0o644); err != nil {
 		t.Fatalf("write local: %v", err)
 	}
 
-	progress := make(chan int64, 1024)
-	collected := make(chan []int64, 1)
-	go func() {
-		var samples []int64
-		for v := range progress {
-			samples = append(samples, v)
-		}
-		collected <- samples
-	}()
-
-	remote := newTestSFTP(t)
-	if err := transfer.Copy(context.Background(), fs.NewLocal(), localPath, remote, remotePath, progress); err != nil {
+	progress, finish := collectProgress()
+	if err := transfer.Copy(context.Background(), fs.NewLocal(), localPath, newTestSFTP(t), remotePath, progress); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
-	close(progress)
-	samples := <-collected
+	msgs := finish()
 
 	got, err := os.ReadFile(remotePath)
 	if err != nil {
@@ -163,12 +138,7 @@ func TestCopyUploadReportsProgress(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("uploaded bytes differ (%d vs %d)", len(got), len(want))
 	}
-	if len(samples) == 0 {
-		t.Fatal("upload reported no progress samples")
-	}
-	if last := samples[len(samples)-1]; last != int64(len(want)) {
-		t.Errorf("final progress = %d, want %d", last, len(want))
-	}
+	assertProgress(t, msgs, int64(len(want)))
 }
 
 func TestCopyRoundTripSFTP(t *testing.T) {
@@ -176,11 +146,7 @@ func TestCopyRoundTripSFTP(t *testing.T) {
 	srcPath := filepath.Join(dir, "a.bin")
 	remotePath := filepath.Join(dir, "remote.bin")
 	backPath := filepath.Join(dir, "b.bin")
-
-	want := make([]byte, 128*1024)
-	if _, err := rand.Read(want); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	want := randBytes(t, 128*1024)
 	if err := os.WriteFile(srcPath, want, 0o644); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
@@ -188,12 +154,9 @@ func TestCopyRoundTripSFTP(t *testing.T) {
 	local := fs.NewLocal()
 	remote := newTestSFTP(t)
 	ctx := context.Background()
-
-	// local -> remote
 	if err := transfer.Copy(ctx, local, srcPath, remote, remotePath, nil); err != nil {
 		t.Fatalf("local->remote: %v", err)
 	}
-	// remote -> local
 	if err := transfer.Copy(ctx, remote, remotePath, local, backPath, nil); err != nil {
 		t.Fatalf("remote->local: %v", err)
 	}
@@ -203,7 +166,51 @@ func TestCopyRoundTripSFTP(t *testing.T) {
 		t.Fatalf("read round-tripped file: %v", err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("round-trip bytes differ from original (%d vs %d bytes)", len(got), len(want))
+		t.Fatalf("round-trip bytes differ (%d vs %d)", len(got), len(want))
+	}
+}
+
+func TestCopyDirectoryTree(t *testing.T) {
+	dir := t.TempDir()
+	srcRoot := filepath.Join(dir, "src")
+	dstRoot := filepath.Join(dir, "dst") // created on the (sftp) destination
+
+	files := map[string][]byte{
+		"a.txt":       []byte("hello"),
+		"sub/b.txt":   randBytes(t, 64*1024),
+		"sub/c/d.bin": randBytes(t, 32*1024),
+	}
+	var total int64
+	for rel, content := range files {
+		p := filepath.Join(srcRoot, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+		total += int64(len(content))
+	}
+
+	progress, finish := collectProgress()
+	if err := transfer.Copy(context.Background(), fs.NewLocal(), srcRoot, newTestSFTP(t), dstRoot, progress); err != nil {
+		t.Fatalf("Copy dir: %v", err)
+	}
+	msgs := finish()
+
+	// Every file landed under dstRoot with identical bytes (sftp serves real fs).
+	for rel, content := range files {
+		got, err := os.ReadFile(filepath.Join(dstRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read copied %s: %v", rel, err)
+		}
+		if !bytes.Equal(got, content) {
+			t.Errorf("%s differs after tree copy", rel)
+		}
+	}
+	assertProgress(t, msgs, total)
+	if last := msgs[len(msgs)-1].Total; last != total {
+		t.Errorf("final reported Total = %d, want %d", last, total)
 	}
 }
 

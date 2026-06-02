@@ -125,6 +125,56 @@ func fsMatrix(t *testing.T, fsys FS, root string) {
 	}
 }
 
+// fsWalkMkdir exercises Walk + MkdirAll against a fixture tree under root.
+func fsWalkMkdir(t *testing.T, fsys FS, root string) {
+	t.Helper()
+
+	tree := filepath.Join(root, "tree")
+	mustMkdir(t, tree)
+	mustMkdir(t, filepath.Join(tree, "sub"))
+	mustWrite(t, filepath.Join(tree, "a.txt"), "aa")
+	mustWrite(t, filepath.Join(tree, "sub", "b.txt"), "bbbb")
+
+	got := map[string]bool{}
+	var files int
+	if err := fsys.Walk(fsys.Join(root, "tree"), func(rel string, e Entry, err error) error {
+		if err != nil {
+			return err
+		}
+		got[rel] = e.IsDir
+		if !e.IsDir {
+			files++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+
+	// Root reported as "", plus the sub dir and both files (slash-relative).
+	for rel, wantDir := range map[string]bool{"": true, "sub": true, "a.txt": false, "sub/b.txt": false} {
+		isDir, seen := got[rel]
+		if !seen {
+			t.Errorf("Walk did not visit %q", rel)
+			continue
+		}
+		if isDir != wantDir {
+			t.Errorf("Walk %q: IsDir=%v, want %v", rel, isDir, wantDir)
+		}
+	}
+	if files != 2 {
+		t.Errorf("Walk saw %d files, want 2", files)
+	}
+
+	// MkdirAll creates nested directories.
+	nested := fsys.Join(root, "x", "y", "z")
+	if err := fsys.MkdirAll(nested); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if ent, err := fsys.Stat(nested); err != nil || !ent.IsDir {
+		t.Errorf("MkdirAll did not create a directory: ent=%+v err=%v", ent, err)
+	}
+}
+
 func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Mkdir(path, 0o755); err != nil {

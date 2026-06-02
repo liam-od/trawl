@@ -176,18 +176,46 @@ func TestModelCopyFlow(t *testing.T) {
 	}
 }
 
-func TestModelCopyRejectsDirectory(t *testing.T) {
-	local := fs.NewLocal()
-	m := New(local, local, "/a", "/b")
-	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: "/a", entries: []fs.Entry{{Name: "sub", IsDir: true}}})
-
-	m, cmd := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	if m.copying || cmd != nil {
-		t.Fatal("copying a directory should be rejected, not started")
+func TestModelCopyDirectory(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	treeRoot := filepath.Join(srcDir, "tree")
+	if err := os.MkdirAll(filepath.Join(treeRoot, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
-	if !strings.Contains(m.status, "directory copy not supported") {
-		t.Errorf("status = %q, want directory-copy rejection", m.status)
+	content := bytes.Repeat([]byte("x"), 4096)
+	if err := os.WriteFile(filepath.Join(treeRoot, "sub", "f.bin"), content, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	local := fs.NewLocal()
+	m := New(local, local, srcDir, dstDir)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "tree", IsDir: true}}})
+	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
+
+	// Copying a directory now starts a recursive copy rather than being rejected.
+	m, cmd := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if !m.copying {
+		t.Fatal("directory copy should start")
+	}
+	sawDone := false
+	for i := 0; cmd != nil && i < 100000; i++ {
+		msg := cmd()
+		if _, ok := msg.(transfer.CopyDoneMsg); ok {
+			sawDone = true
+		}
+		m, cmd = drive(t, m, msg)
+	}
+	if !sawDone {
+		t.Fatal("directory copy never reported done")
+	}
+	got, err := os.ReadFile(filepath.Join(dstDir, "tree", "sub", "f.bin"))
+	if err != nil {
+		t.Fatalf("read copied tree file: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Error("copied tree file differs from source")
 	}
 }
 

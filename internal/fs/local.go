@@ -3,6 +3,7 @@ package fs
 import (
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 )
@@ -56,4 +57,34 @@ func (localFS) Stat(path string) (Entry, error) {
 	return entryFromInfo(fi), nil
 }
 
+func (localFS) MkdirAll(path string) error {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", path, err)
+	}
+	return nil
+}
+
+func (localFS) Walk(root string, fn WalkFunc) error {
+	return filepath.WalkDir(root, func(p string, d iofs.DirEntry, err error) error {
+		rel := relSlash(root, p)
+		if err != nil {
+			return fn(rel, Entry{}, err)
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return fn(rel, Entry{}, ierr)
+		}
+		return fn(rel, entryFromInfo(info), nil)
+	})
+}
+
 func (localFS) Join(elem ...string) string { return filepath.Join(elem...) }
+
+// relSlash returns p relative to root in forward-slash form ("" for the root).
+func relSlash(root, p string) string {
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == "." {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}

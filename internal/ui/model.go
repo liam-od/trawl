@@ -55,10 +55,9 @@ type Model struct {
 	// Single in-flight copy. copying gates a second copy from starting; the
 	// channels stream progress and the final result from the copy goroutine.
 	copying      bool
-	copyProgress chan int64
+	copyProgress chan transfer.CopyProgressMsg
 	copyResult   chan error
 	copyName     string
-	copyTotal    int64
 	copyDstPane  int
 
 	// Transfer-rate state, sampled over real elapsed time and EMA-smoothed.
@@ -133,8 +132,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastRateBytes = msg.Written
 			m.lastRateSample = now
 		}
-		m.status = formatCopyStatus(m.copyName, msg.Written, m.copyTotal, m.rateEMA)
-		return m, waitForCopy(m.copyProgress, m.copyResult, m.copyTotal)
+		m.status = formatCopyStatus(m.copyName, msg.Written, msg.Total, m.rateEMA)
+		return m, waitForCopy(m.copyProgress, m.copyResult)
 
 	case transfer.CopyDoneMsg:
 		m.copying = false
@@ -224,15 +223,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if e == nil {
 			return m, nil
 		}
-		if e.IsDir {
-			m.status = "directory copy not supported yet"
-			return m, nil
-		}
+		// Files and directories both copy toward the inactive panel's directory;
+		// transfer.Copy recurses when the source is a directory.
 		dstPane := 1 - m.activePane
 		dstFS := m.fsFor(dstPane)
 		srcPath := activeFS.Join(active.path, e.Name)
 		dstPath := dstFS.Join(m.panelFor(dstPane).path, e.Name)
-		return m.startCopy(e.Name, e.Size, activeFS, srcPath, dstFS, dstPath, dstPane)
+		return m.startCopy(e.Name, activeFS, srcPath, dstFS, dstPath, dstPane)
 	}
 	return m, nil
 }

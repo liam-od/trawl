@@ -14,28 +14,28 @@ import (
 // inactive panel's directory and returns the command that streams its progress.
 // The caller has already ensured no copy is in flight and that the entry is a
 // regular file.
-func (m Model) startCopy(name string, total int64, srcFS fs.FS, srcPath string, dstFS fs.FS, dstPath string, dstPane int) (tea.Model, tea.Cmd) {
-	progress := make(chan int64, 64)
+func (m Model) startCopy(name string, srcFS fs.FS, srcPath string, dstFS fs.FS, dstPath string, dstPane int) (tea.Model, tea.Cmd) {
+	progress := make(chan transfer.CopyProgressMsg, 64)
 	result := make(chan error, 1)
 
 	m.copying = true
 	m.copyProgress = progress
 	m.copyResult = result
 	m.copyName = name
-	m.copyTotal = total
 	m.copyDstPane = dstPane
 	m.rateEMA = 0
 	m.lastRateBytes = 0
 	m.lastRateSample = time.Now()
-	m.status = formatCopyStatus(name, 0, total, 0)
+	m.status = formatCopyStatus(name, 0, 0, 0)
 
 	go func() {
-		// M4 has no mid-copy cancel binding; Ctrl+C tears the program down and
-		// the goroutine exits with it. Cancellation is post-v1.
+		// No mid-copy cancel binding yet; Ctrl+C tears the program down and the
+		// goroutine exits with it. Cancellation is post-v1. transfer.Copy recurses
+		// when srcPath is a directory.
 		result <- transfer.Copy(context.Background(), srcFS, srcPath, dstFS, dstPath, progress)
 	}()
 
-	return m, waitForCopy(progress, result, total)
+	return m, waitForCopy(progress, result)
 }
 
 // waitForCopy blocks (off the event loop, inside a tea.Cmd) for the next copy
@@ -43,11 +43,11 @@ func (m Model) startCopy(name string, total int64, srcFS fs.FS, srcPath string, 
 // each CopyProgressMsg and stops on CopyDoneMsg. The result channel is buffered,
 // so once Copy returns the done signal is always deliverable even if buffered
 // progress samples go unread.
-func waitForCopy(progress <-chan int64, result <-chan error, total int64) tea.Cmd {
+func waitForCopy(progress <-chan transfer.CopyProgressMsg, result <-chan error) tea.Cmd {
 	return func() tea.Msg {
 		select {
-		case written := <-progress:
-			return transfer.CopyProgressMsg{Written: written, Total: total}
+		case p := <-progress:
+			return p
 		case err := <-result:
 			return transfer.CopyDoneMsg{Err: err}
 		}

@@ -11,6 +11,10 @@ func TestSFTPFS(t *testing.T) {
 	fsMatrix(t, newTestSFTP(t), t.TempDir())
 }
 
+func TestSFTPFSWalkMkdir(t *testing.T) {
+	fsWalkMkdir(t, newTestSFTP(t), t.TempDir())
+}
+
 func TestSFTPFS_Join(t *testing.T) {
 	got := NewSFTP(nil).Join("/a", "b", "c")
 	if want := "/a/b/c"; got != want {

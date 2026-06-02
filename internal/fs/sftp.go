@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strings"
 
 	"github.com/pkg/sftp"
 )
@@ -53,6 +54,30 @@ func (s *sftpFS) Stat(p string) (Entry, error) {
 		return Entry{}, fmt.Errorf("stat %s: %w", p, err)
 	}
 	return entryFromInfo(fi), nil
+}
+
+func (s *sftpFS) MkdirAll(path string) error {
+	if err := s.client.MkdirAll(path); err != nil {
+		return fmt.Errorf("mkdir %s: %w", path, err)
+	}
+	return nil
+}
+
+func (s *sftpFS) Walk(root string, fn WalkFunc) error {
+	w := s.client.Walk(root)
+	for w.Step() {
+		rel := strings.TrimPrefix(strings.TrimPrefix(w.Path(), root), "/")
+		if err := w.Err(); err != nil {
+			if ferr := fn(rel, Entry{}, err); ferr != nil {
+				return ferr
+			}
+			continue
+		}
+		if ferr := fn(rel, entryFromInfo(w.Stat()), nil); ferr != nil {
+			return ferr
+		}
+	}
+	return nil
 }
 
 func (s *sftpFS) Join(elem ...string) string { return path.Join(elem...) }

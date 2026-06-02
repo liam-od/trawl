@@ -17,6 +17,13 @@ type Entry struct {
 	Mode  iofs.FileMode
 }
 
+// WalkFunc is called for each entry under a walk root, including the root
+// itself. rel is the entry's path relative to the root, always forward-slash
+// separated regardless of platform ("" for the root). A non-nil err reports a
+// failure reading that path; returning a non-nil error from the callback stops
+// the walk and Walk returns it.
+type WalkFunc func(rel string, entry Entry, err error) error
+
 // FS is the common interface over the local and remote filesystems. Paths are
 // absolute and use the convention native to the implementation: OS-native for
 // LocalFS, POSIX (forward-slash) for SFTPFS. Build child paths with Join rather
@@ -26,6 +33,8 @@ type FS interface {
 	Open(path string) (io.ReadCloser, error)
 	Create(path string) (io.WriteCloser, error)
 	Stat(path string) (Entry, error)
+	MkdirAll(path string) error
+	Walk(root string, fn WalkFunc) error
 	Join(elem ...string) string
 }
 

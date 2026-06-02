@@ -6,6 +6,10 @@ func TestLocalFS(t *testing.T) {
 	fsMatrix(t, NewLocal(), t.TempDir())
 }
 
+func TestLocalFSWalkMkdir(t *testing.T) {
+	fsWalkMkdir(t, NewLocal(), t.TempDir())
+}
+
 func TestLocalFS_Join(t *testing.T) {
 	got := NewLocal().Join("/a", "b", "c")
 	want := "/a/b/c" // OS-native; on the test platform (linux) the separator is '/'.

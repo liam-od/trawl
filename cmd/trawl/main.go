@@ -111,7 +111,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if wantPassword {
 		cfg.PasswordPrompt = passwordPrompt
 	}
-	cfg.KnownHostsPath = *knownHosts
+	// Expand a leading ~ in paths that may come from the config file, where (unlike
+	// the command line) no shell did it for us.
+	cfg.KeyPath = expandHome(cfg.KeyPath)
+	cfg.KnownHostsPath = expandHome(*knownHosts)
 	cfg.HostKeyPrompt = hostKeyPrompt
 
 	if err := connectAndServe(target, cfg); err != nil {
@@ -251,6 +254,23 @@ func defaultKnownHosts() string {
 		return ""
 	}
 	return filepath.Join(home, ".ssh", "known_hosts")
+}
+
+// expandHome replaces a leading ~ (alone or before a separator) with the user's
+// home directory. It leaves the path unchanged if home can't be determined or
+// there's no leading ~, so callers can apply it unconditionally.
+func expandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }
 
 // defaultConfigPath returns the config file location, or an empty string if it

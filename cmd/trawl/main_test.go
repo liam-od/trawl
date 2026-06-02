@@ -89,6 +89,23 @@ func TestUnknownFlagIsUsageError(t *testing.T) {
 	}
 }
 
+func TestExpandHome(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+	cases := map[string]string{
+		"~/.ssh/key":      "/home/tester/.ssh/key",
+		"~":               "/home/tester",
+		"/abs/path":       "/abs/path",
+		"relative/path":   "relative/path",
+		"~tricky/notpath": "~tricky/notpath", // ~ not followed by / is left alone
+		"":                "",
+	}
+	for in, want := range cases {
+		if got := expandHome(in); got != want {
+			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestMergeUserPrecedence(t *testing.T) {
 	fileCfg := config.File{DefaultUser: "cfguser", PasswordFallback: true}
 

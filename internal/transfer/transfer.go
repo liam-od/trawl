@@ -1,20 +1,22 @@
-// Package transfer streams a single file between two fs.FS instances (local
-// disk or a remote SFTP server) and reports progress as it goes. Recursive
-// directory copy, queues, and resume are out of scope for v1.
+// Package transfer streams files and directory trees between two fs.FS
+// instances (local disk or a remote SFTP server) and reports progress as it
+// goes. Multi-transfer queues and resume are out of scope for v1.
 package transfer
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/pkg/sftp"
 
 	"github.com/liam-od/trawl/internal/fs"
 )
 
-// CopyProgressMsg reports the bytes written so far for an in-flight copy. Total
-// is the source size when known (0 if unknown).
+// CopyProgressMsg reports the running byte total for an in-flight copy. Total is
+// the size of the whole transfer when known (0 while a directory is still being
+// scanned).
 type CopyProgressMsg struct {
 	Written int64
 	Total   int64
@@ -25,21 +27,77 @@ type CopyDoneMsg struct {
 	Err error
 }
 
-// Copy streams the file at srcPath on src to dstPath on dst, reporting the
-// running byte total on progress with non-blocking sends (progress may be nil).
-// The copy aborts if ctx is cancelled. On any error a partial destination file
-// may remain — atomic writes are deferred until recursive copy lands (ROADMAP).
+// Copy transfers srcPath on src to dstPath on dst, recursing if srcPath is a
+// directory (dstPath is then the destination directory to create). It reports
+// CopyProgressMsg values on progress with non-blocking sends (progress may be
+// nil) and aborts if ctx is cancelled. On error a partial destination may
+// remain — atomic writes are deferred until post-v1.
+func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath string, progress chan<- CopyProgressMsg) error {
+	info, err := src.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat source: %w", err)
+	}
+
+	c := &counter{ctx: ctx, progress: progress}
+	if info.IsDir {
+		return copyTree(c, src, srcPath, dst, dstPath)
+	}
+	c.total = info.Size
+	return copyFile(c, src, srcPath, dst, dstPath)
+}
+
+// copyTree copies the directory rooted at srcRoot into dstRoot, creating dstRoot
+// and mirroring the tree. It walks twice: once to total the bytes (so progress
+// has a denominator), then once to create directories and copy files. The
+// counter accumulates across every file so progress is cumulative for the tree.
+func copyTree(c *counter, src fs.FS, srcRoot string, dst fs.FS, dstRoot string) error {
+	var total int64
+	if err := src.Walk(srcRoot, func(_ string, e fs.Entry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !e.IsDir {
+			total += e.Size
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("scan %s: %w", srcRoot, err)
+	}
+	c.total = total
+	c.report() // publish the total before any bytes move
+
+	return src.Walk(srcRoot, func(rel string, e fs.Entry, err error) error {
+		if err != nil {
+			return fmt.Errorf("walk %s: %w", srcRoot, err)
+		}
+		destPath := joinRel(dst, dstRoot, rel)
+		if e.IsDir {
+			return dst.MkdirAll(destPath)
+		}
+		return copyFile(c, src, joinRel(src, srcRoot, rel), dst, destPath)
+	})
+}
+
+// joinRel resolves a slash-separated path relative to root into fsys's native
+// path. An empty rel denotes the root itself.
+func joinRel(fsys fs.FS, root, rel string) string {
+	if rel == "" {
+		return root
+	}
+	return fsys.Join(append([]string{root}, strings.Split(rel, "/")...)...)
+}
+
+// copyFile streams a single regular file, accumulating bytes into c.
 //
 // Throughput note: pkg/sftp only parallelises its SSH requests through
 // sftp.File.WriteTo (downloads) and sftp.File.ReadFrom (uploads), which io.Copy
 // selects by dynamic type. Wrapping the SFTP file in a counter would hide those
-// methods and collapse the transfer to one blocking request at a time — crippling
-// throughput on a high-latency link. So the byte counter goes on the *other*
-// side: when downloading we count the writer (and let WriteTo drive concurrent
-// reads); otherwise we count the reader (and let an SFTP destination's ReadFrom
-// drive concurrent writes). Note *os.File implements both WriteTo and ReadFrom,
-// so the SFTP file must be identified by type, not by interface.
-func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath string, progress chan<- int64) error {
+// methods and collapse the transfer to one blocking request at a time. So the
+// counter goes on the *other* side: downloads count the writer (letting WriteTo
+// drive concurrent reads); otherwise we count the reader (letting an SFTP
+// destination's ReadFrom drive concurrent writes). *os.File implements both
+// WriteTo and ReadFrom, so the SFTP file is identified by type, not interface.
+func copyFile(c *counter, src fs.FS, srcPath string, dst fs.FS, dstPath string) error {
 	r, err := src.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("open source: %w", err)
@@ -53,14 +111,9 @@ func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath str
 
 	var copyErr error
 	if _, ok := r.(*sftp.File); ok {
-		// Download: io.Copy(dst, sftpSrc) uses sftpSrc.WriteTo → concurrent reads.
-		cw := &countingWriter{w: w, ctx: ctx, progress: progress}
-		_, copyErr = io.Copy(cw, r)
+		copyErr = errFromCopy(io.Copy(&countingWriter{w: w, c: c}, r))
 	} else {
-		// Upload / local: io.Copy(dst, countingReader) lets an SFTP destination's
-		// ReadFrom run (concurrent writes); a local destination stays sequential.
-		cr := &countingReader{r: r, ctx: ctx, progress: progress}
-		_, copyErr = io.Copy(w, cr)
+		copyErr = errFromCopy(io.Copy(w, &countingReader{r: r, c: c}))
 	}
 	closeErr := w.Close()
 
@@ -73,56 +126,64 @@ func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath str
 	return nil
 }
 
-// countingReader wraps an io.Reader, accumulating the byte count and reporting
-// it on progress after each read. It also makes the copy ctx-cancellable.
-type countingReader struct {
-	r        io.Reader
+func errFromCopy(_ int64, err error) error { return err }
+
+// counter accumulates bytes transferred across one Copy (one file, or every
+// file in a tree) and reports the running total over progress with non-blocking
+// sends. It also carries the cancellation context for the counting wrappers.
+type counter struct {
 	ctx      context.Context
+	progress chan<- CopyProgressMsg
 	written  int64
-	progress chan<- int64
+	total    int64
 }
 
-func (c *countingReader) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
+func (c *counter) add(n int) {
+	c.written += int64(n)
+	c.report()
+}
+
+func (c *counter) report() {
+	if c.progress == nil {
+		return
+	}
+	select {
+	case c.progress <- CopyProgressMsg{Written: c.written, Total: c.total}:
+	default: // consumer is behind; drop this sample, the total only grows
+	}
+}
+
+// countingReader counts bytes read and makes the copy ctx-cancellable.
+type countingReader struct {
+	r io.Reader
+	c *counter
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	if err := cr.c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := c.r.Read(p)
+	n, err := cr.r.Read(p)
 	if n > 0 {
-		c.written += int64(n)
-		if c.progress != nil {
-			select {
-			case c.progress <- c.written:
-			default: // consumer is behind; drop this sample, the total only grows
-			}
-		}
+		cr.c.add(n)
 	}
 	return n, err
 }
 
-// countingWriter wraps an io.Writer, accumulating the byte count and reporting
-// it on progress after each write. It is used on the download path so the SFTP
-// source's concurrent WriteTo is preserved while still tracking progress. It
-// also makes the copy ctx-cancellable.
+// countingWriter counts bytes written (used on the download path so the SFTP
+// source's concurrent WriteTo is preserved) and makes the copy ctx-cancellable.
 type countingWriter struct {
-	w        io.Writer
-	ctx      context.Context
-	written  int64
-	progress chan<- int64
+	w io.Writer
+	c *counter
 }
 
-func (c *countingWriter) Write(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	if err := cw.c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := c.w.Write(p)
+	n, err := cw.w.Write(p)
 	if n > 0 {
-		c.written += int64(n)
-		if c.progress != nil {
-			select {
-			case c.progress <- c.written:
-			default: // consumer is behind; drop this sample, the total only grows
-			}
-		}
+		cw.c.add(n)
 	}
 	return n, err
 }
