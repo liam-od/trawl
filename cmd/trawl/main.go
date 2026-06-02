@@ -12,7 +12,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -74,14 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	rest := fset.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(stderr, "error: expected exactly one target")
-		fset.Usage()
-		return 1
-	}
-
-	target, err := sshx.ParseTarget(rest[0])
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		fmt.Fprintln(stderr, "error: expected exactly one target or saved host name")
 		fset.Usage()
 		return 1
 	}
@@ -89,6 +84,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fileCfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	target, localStart, fileCfg, err := resolveArg(rest[0], fileCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		if strings.Contains(rest[0], "@") {
+			fset.Usage() // a malformed live target; show the format
+		}
 		return 1
 	}
 
@@ -117,11 +121,38 @@ func run(args []string, stdout, stderr io.Writer) int {
 	cfg.KnownHostsPath = expandHome(*knownHosts)
 	cfg.HostKeyPrompt = hostKeyPrompt
 
-	if err := connectAndServe(target, cfg); err != nil {
+	if err := connectAndServe(target, cfg, localStart); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// resolveArg turns the single positional argument into a connection target. An
+// argument containing "@" is parsed as a live "user@host[:port][:/path]" target;
+// anything else is looked up as a saved host name (a miss is an error). For a
+// saved host it returns the local start directory (with a leading ~ expanded
+// against the local home) and a copy of fileCfg with the host's key overlaid on
+// the global default, so the later flag>host>default merge stays correct.
+func resolveArg(arg string, fileCfg config.File) (sshx.Target, string, config.File, error) {
+	if strings.Contains(arg, "@") {
+		target, err := sshx.ParseTarget(arg)
+		return target, "", fileCfg, err
+	}
+
+	host, ok := fileCfg.Host(arg)
+	if !ok {
+		return sshx.Target{}, "", fileCfg,
+			fmt.Errorf("no saved host %q (run trawl --setup to add one)", arg)
+	}
+	target := sshx.Target{User: host.User, Host: host.Host, Path: host.RemoteDir}
+	if host.Port != 0 {
+		target.Port = strconv.Itoa(host.Port)
+	}
+	if host.KeyPath != "" {
+		fileCfg.KeyPath = host.KeyPath
+	}
+	return target, expandHome(host.LocalDir), fileCfg, nil
 }
 
 // cliFlags carries the parsed flag values plus the set of flag names the user
@@ -177,8 +208,9 @@ func mergeSettings(target sshx.Target, fileCfg config.File, f cliFlags) (sshx.Ta
 }
 
 // connectAndServe opens the SSH/SFTP session and runs the TUI until the user
-// quits or a termination signal arrives, tearing the session down in order.
-func connectAndServe(target sshx.Target, cfg sshx.Config) error {
+// quits or a termination signal arrives, tearing the session down in order. An
+// empty localStart defaults to the current working directory.
+func connectAndServe(target sshx.Target, cfg sshx.Config, localStart string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -188,19 +220,23 @@ func connectAndServe(target sshx.Target, cfg sshx.Config) error {
 	}
 	defer sess.Close()
 
-	localStart, err := os.Getwd()
+	if localStart == "" {
+		if localStart, err = os.Getwd(); err != nil {
+			localStart = "/"
+		}
+	}
+
+	// The remote home is only knowable once connected, so a remote ~ (and the
+	// no-path default) is resolved here against the server's working directory.
+	remoteHome, err := sess.SFTP.Getwd()
 	if err != nil {
-		localStart = "/"
+		remoteHome = "/"
 	}
 	remoteStart := target.Path
 	if remoteStart == "" {
-		// No path given: start at the remote working directory (the user's home
-		// on most servers).
-		if wd, err := sess.SFTP.Getwd(); err == nil {
-			remoteStart = wd
-		} else {
-			remoteStart = "/"
-		}
+		remoteStart = remoteHome
+	} else {
+		remoteStart = expandRemoteHome(remoteStart, remoteHome)
 	}
 
 	model := ui.New(fs.NewLocal(), fs.NewSFTP(sess.SFTP), localStart, remoteStart)
@@ -273,6 +309,20 @@ func expandHome(p string) string {
 	return filepath.Join(home, p[2:])
 }
 
+// expandRemoteHome replaces a leading ~ (alone or before a slash) in a remote
+// path with the remote home directory. Remote paths are always POSIX, so it uses
+// the path package, never filepath. A path without a leading ~ is returned
+// unchanged, so callers can apply it unconditionally.
+func expandRemoteHome(p, home string) string {
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") {
+		return path.Join(home, p[2:])
+	}
+	return p
+}
+
 // defaultConfigPath returns the config file location, or an empty string if it
 // can't be determined.
 func defaultConfigPath() string {
@@ -284,8 +334,11 @@ func defaultConfigPath() string {
 }
 
 const usageText = `usage: trawl [flags] user@host[:port][:/remote/path]
+       trawl [flags] <saved-host-name>
 
-A dual-pane terminal SFTP file manager.
+A dual-pane terminal SFTP file manager. The argument is either a live target of
+the form user@host[:port][:/remote/path], or — if it contains no "@" — the name
+of a host saved via "trawl --setup".
 
 Flags:
   --port N          SSH port (overrides :port in the target; default 22)
@@ -295,9 +348,9 @@ Flags:
   --no-password     disable the password fallback
   --known-hosts P   known_hosts file (default ~/.ssh/known_hosts)
   --config PATH     config file (default ~/.config/trawl/config.json)
-  --setup           run the interactive setup wizard and exit
+  --setup           manage saved hosts and global defaults, then exit
   --version         print version and exit
   --help            show this help and exit
 
-Connection settings resolve as: CLI flag > config file > built-in default.
+Connection settings resolve as: CLI flag > saved host > config default > built-in.
 `

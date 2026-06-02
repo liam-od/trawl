@@ -51,14 +51,15 @@ func TestNoArgsIsUsageError(t *testing.T) {
 	}
 }
 
-func TestBareHostWithoutUserIsRejected(t *testing.T) {
-	// "bogus" parses as a bare host but has no user, which trawl requires.
+func TestBareWordIsTreatedAsSavedHost(t *testing.T) {
+	// A bare word (no "@") is a saved host name, not a live target. With no
+	// matching host it fails with a no-saved-host error rather than connecting.
 	code, _, errOut := runArgs(t, "bogus")
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(errOut, "user@host") {
-		t.Errorf("expected an error mentioning the expected format, got:\n%s", errOut)
+	if !strings.Contains(errOut, "no saved host") {
+		t.Errorf("expected a no-saved-host error, got:\n%s", errOut)
 	}
 }
 
@@ -103,6 +104,99 @@ func TestExpandHome(t *testing.T) {
 		if got := expandHome(in); got != want {
 			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestExpandRemoteHome(t *testing.T) {
+	const home = "/home/remote"
+	cases := map[string]string{
+		"~":        home,
+		"~/logs":   home + "/logs",
+		"~/a/b":    home + "/a/b",
+		"/srv/www": "/srv/www",
+		"relative": "relative",
+		"~tricky":  "~tricky", // ~ not followed by / is left alone
+		"":         "",
+	}
+	for in, want := range cases {
+		if got := expandRemoteHome(in, home); got != want {
+			t.Errorf("expandRemoteHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResolveArgLiveTarget(t *testing.T) {
+	target, local, _, err := resolveArg("me@host:2200:/srv", config.File{})
+	if err != nil {
+		t.Fatalf("resolveArg: %v", err)
+	}
+	if target.User != "me" || target.Host != "host" || target.Port != "2200" || target.Path != "/srv" {
+		t.Errorf("target = %+v, want me@host:2200:/srv", target)
+	}
+	if local != "" {
+		t.Errorf("localStart = %q, want empty (defer to cwd)", local)
+	}
+}
+
+func TestResolveArgSavedHost(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+	fileCfg := config.File{
+		KeyPath: "/cfg/key",
+		Hosts: map[string]config.Host{
+			"prod": {
+				User: "admin", Host: "10.0.0.5", Port: 2222,
+				KeyPath: "/host/key", RemoteDir: "/srv/www", LocalDir: "~/site",
+			},
+		},
+	}
+	target, local, cfg, err := resolveArg("prod", fileCfg)
+	if err != nil {
+		t.Fatalf("resolveArg: %v", err)
+	}
+	if target.User != "admin" || target.Host != "10.0.0.5" || target.Port != "2222" || target.Path != "/srv/www" {
+		t.Errorf("target = %+v, want admin@10.0.0.5:2222:/srv/www", target)
+	}
+	if want := "/home/tester/site"; local != want {
+		t.Errorf("localStart = %q, want %q", local, want)
+	}
+	if cfg.KeyPath != "/host/key" {
+		t.Errorf("KeyPath = %q, want /host/key (per-host overlay)", cfg.KeyPath)
+	}
+}
+
+func TestResolveArgUnknownHost(t *testing.T) {
+	_, _, _, err := resolveArg("nope", config.File{})
+	if err == nil || !strings.Contains(err.Error(), "no saved host") {
+		t.Fatalf("err = %v, want a no-saved-host error", err)
+	}
+}
+
+func TestUnknownAliasExitsOne(t *testing.T) {
+	code, _, errOut := runArgs(t, "nope")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "no saved host") {
+		t.Errorf("expected a no-saved-host error, got:\n%s", errOut)
+	}
+}
+
+func TestSavedHostFlagOverride(t *testing.T) {
+	// --port beats the saved host's port. resolveArg sets target.Port; mergeSettings
+	// then lets the explicit flag win.
+	fileCfg := config.File{Hosts: map[string]config.Host{
+		"prod": {User: "admin", Host: "h", Port: 2222},
+	}}
+	target, _, cfg, err := resolveArg("prod", fileCfg)
+	if err != nil {
+		t.Fatalf("resolveArg: %v", err)
+	}
+	_, merged, _, err := mergeSettings(target, cfg, cliFlags{port: 22, set: map[string]bool{"port": true}})
+	if err != nil {
+		t.Fatalf("mergeSettings: %v", err)
+	}
+	if merged.Port != 22 {
+		t.Errorf("merged port = %d, want 22 (--port over saved host)", merged.Port)
 	}
 }
 

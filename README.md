@@ -62,28 +62,51 @@ make build-all        # → bin/trawl-linux-amd64, bin/trawl-windows-amd64.exe
 
 ```sh
 trawl [flags] user@host[:port][:/remote/path]
+trawl [flags] <saved-host-name>
 ```
+
+The argument is either a live target, or — if it contains no `@` — the name of a
+host you saved with `trawl --setup` (see below).
 
 Examples:
 
 ```sh
 trawl me@example.com                 # start in your remote home directory
 trawl me@example.com:2222:/var/www   # custom port and starting path
+trawl prod                           # connect to the saved host "prod"
 ```
 
 On the first connection to a host you'll be shown its key fingerprint and asked
 whether to add it to `~/.ssh/known_hosts`. After that, a changed host key is
 refused automatically.
 
-### One-time setup (optional)
+### Setup and saved connections
 
-Save your defaults so you can just type `trawl host`:
+`trawl --setup` opens an interactive menu, written to
+`~/.config/trawl/config.json`:
 
-```sh
-trawl --setup        # prompts for default user, key path, port, password fallback
+```
+1) Edit global defaults     default user, key path, port, password fallback
+2) Add a saved host         name, user@host, port, key, remote dir, local dir
+3) Edit a saved host
+4) Remove a saved host
+5) Quit
 ```
 
-Settings resolve as: command-line flag > config file (`~/.config/trawl/config.json`) > built-in default.
+The global defaults let you drop repetitive flags (`trawl host` instead of
+`trawl --user me --key … me@host`). A **saved host** goes further: it remembers a
+whole connection under a name, so `trawl prod` connects to it. Each saved host can
+also set a default **local** and **remote** directory, so the two panels open
+where you want them — a leading `~` expands to your local home for the local
+directory and to the remote account's home for the remote directory.
+
+```sh
+trawl --setup     # choose "2", name it "prod", set its dirs
+trawl prod        # connects; panels open in the saved directories
+```
+
+Settings resolve as: command-line flag > saved host > global default in
+`~/.config/trawl/config.json` > built-in default.
 
 ### Authentication
 
@@ -121,7 +144,7 @@ current transfer rate. Press `F5`/`c` again while one is running to queue more.
 --no-password     disable the password fallback
 --known-hosts P   known_hosts file (default ~/.ssh/known_hosts)
 --config PATH     config file (default ~/.config/trawl/config.json)
---setup           run the interactive setup wizard and exit
+--setup           manage saved hosts and global defaults, then exit
 --version         print version and exit
 --help            show this help and exit
 ```
