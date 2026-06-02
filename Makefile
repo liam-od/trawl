@@ -13,7 +13,7 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(PKG)
 
 run:
-	go run $(PKG)
+	go run $(PKG) $(ARGS)
 
 test:
 	go test ./...
