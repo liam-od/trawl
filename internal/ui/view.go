@@ -164,7 +164,7 @@ func formatSize(b int64) string {
 }
 
 func (m Model) renderStatus() string {
-	const hints = "[Tab] switch  [Enter] open  [Backspace] up  [r] refresh  [q] quit"
+	const hints = "[Tab] switch  [Enter] open  [F5/c] copy  [Backspace] up  [r] refresh  [q] quit"
 	text := hints
 	if m.status != "" {
 		text = m.status + "  |  " + hints

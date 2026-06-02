@@ -5,9 +5,12 @@
 package ui
 
 import (
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/liam-od/trawl/internal/fs"
+	"github.com/liam-od/trawl/internal/transfer"
 )
 
 // pane identifiers.
@@ -37,6 +40,15 @@ type Model struct {
 	width      int
 	height     int
 	status     string
+
+	// Single in-flight copy. copying gates a second copy from starting; the
+	// channels stream progress and the final result from the copy goroutine.
+	copying      bool
+	copyProgress chan int64
+	copyResult   chan error
+	copyName     string
+	copyTotal    int64
+	copyDstPane  int
 }
 
 // New builds a Model with each panel rooted at the given start path. The two
@@ -91,6 +103,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dirLoadedMsg:
 		m.applyDirLoaded(msg)
 		return m, nil
+
+	case transfer.CopyProgressMsg:
+		if !m.copying {
+			return m, nil // stale sample from a finished copy
+		}
+		if m.copyTotal > 0 {
+			m.status = fmt.Sprintf("Copying %s… %d%%", m.copyName, msg.Written*100/m.copyTotal)
+		} else {
+			m.status = fmt.Sprintf("Copying %s…", m.copyName)
+		}
+		return m, waitForCopy(m.copyProgress, m.copyResult, m.copyTotal)
+
+	case transfer.CopyDoneMsg:
+		m.copying = false
+		m.copyProgress = nil
+		m.copyResult = nil
+		if msg.Err != nil {
+			m.status = "copy failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.status = fmt.Sprintf("copied %s", m.copyName)
+		// Refresh the destination panel so the new file appears; same path, so
+		// applyDirLoaded preserves the cursor.
+		dstFS := m.fsFor(m.copyDstPane)
+		return m, loadDir(dstFS, m.copyDstPane, m.panelFor(m.copyDstPane).path)
 	}
 	return m, nil
 }
@@ -113,7 +150,9 @@ func (m *Model) applyDirLoaded(msg dirLoadedMsg) {
 		p.cursor = max(0, len(p.entries)-1)
 		p.offset = 0
 	}
-	m.status = ""
+	// Note: a successful load does not clear m.status — that would wipe the
+	// "copied X" message produced by the post-copy destination refresh. Status
+	// is owned by the actions that set it (errors, copy results).
 }
 
 // handleKey maps a keypress to navigation of the active panel. Directory reads
@@ -154,6 +193,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		return m, loadDir(activeFS, m.activePane, active.path)
+
+	case "f5", "c":
+		if m.copying {
+			m.status = "copy already in progress"
+			return m, nil
+		}
+		e := active.selected()
+		if e == nil {
+			return m, nil
+		}
+		if e.IsDir {
+			m.status = "directory copy not supported yet"
+			return m, nil
+		}
+		dstPane := 1 - m.activePane
+		dstFS := m.fsFor(dstPane)
+		srcPath := activeFS.Join(active.path, e.Name)
+		dstPath := dstFS.Join(m.panelFor(dstPane).path, e.Name)
+		return m.startCopy(e.Name, e.Size, activeFS, srcPath, dstFS, dstPath, dstPane)
 	}
 	return m, nil
 }
