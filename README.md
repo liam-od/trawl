@@ -3,6 +3,8 @@
 A keyboard-driven, dual-pane terminal SFTP file manager. Connect to a host, browse local and remote
 side by side, and copy files or whole directories with a keystroke.
 
+![trawl](docs/preview.png)
+
 ## Install
 
 ### Linux (one-liner)
