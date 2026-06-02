@@ -163,6 +163,19 @@ func formatSize(b int64) string {
 	return fmt.Sprintf("%.1f%cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
+// formatCopyStatus builds the status-bar line for an in-flight copy: a percentage
+// when the total is known, and the smoothed rate once the first sample exists.
+func formatCopyStatus(name string, written, total int64, rateBytesPerSec float64) string {
+	s := "Copying " + name + "…"
+	if total > 0 {
+		s += fmt.Sprintf(" %d%%", written*100/total)
+	}
+	if rateBytesPerSec > 0 {
+		s += "  " + formatSize(int64(rateBytesPerSec)) + "/s"
+	}
+	return s
+}
+
 func (m Model) renderStatus() string {
 	const hints = "[Tab] switch  [Enter] open  [F5/c] copy  [Backspace] up  [r] refresh  [q] quit"
 	text := hints

@@ -6,11 +6,22 @@ package ui
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/liam-od/trawl/internal/fs"
 	"github.com/liam-od/trawl/internal/transfer"
+)
+
+// Transfer-rate smoothing. The rate is recomputed at most every rateWindow over
+// the real elapsed wall-clock time since the last sample (never a fixed nominal
+// interval), then exponentially smoothed. With these values the EMA settles over
+// roughly a 1s window, so the bursty writes pkg/sftp produces under concurrent
+// reads don't make the rate flicker. See the M4 carry-forward note in ROADMAP.md.
+const (
+	rateWindow = 250 * time.Millisecond
+	rateAlpha  = 0.25
 )
 
 // pane identifiers.
@@ -49,6 +60,11 @@ type Model struct {
 	copyName     string
 	copyTotal    int64
 	copyDstPane  int
+
+	// Transfer-rate state, sampled over real elapsed time and EMA-smoothed.
+	rateEMA        float64   // bytes/sec, 0 until the first sample
+	lastRateBytes  int64     // cumulative bytes at the last rate sample
+	lastRateSample time.Time // wall-clock time of the last rate sample
 }
 
 // New builds a Model with each panel rooted at the given start path. The two
@@ -108,11 +124,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.copying {
 			return m, nil // stale sample from a finished copy
 		}
-		if m.copyTotal > 0 {
-			m.status = fmt.Sprintf("Copying %s… %d%%", m.copyName, msg.Written*100/m.copyTotal)
-		} else {
-			m.status = fmt.Sprintf("Copying %s…", m.copyName)
+		// Recompute the rate only once per rateWindow, over the true elapsed time
+		// since the last sample, so the EMA averages over ~1s regardless of how
+		// often samples arrive.
+		now := time.Now()
+		if elapsed := now.Sub(m.lastRateSample).Seconds(); elapsed >= rateWindow.Seconds() {
+			m.rateEMA = emaRate(m.rateEMA, float64(msg.Written-m.lastRateBytes), elapsed)
+			m.lastRateBytes = msg.Written
+			m.lastRateSample = now
 		}
+		m.status = formatCopyStatus(m.copyName, msg.Written, m.copyTotal, m.rateEMA)
 		return m, waitForCopy(m.copyProgress, m.copyResult, m.copyTotal)
 
 	case transfer.CopyDoneMsg:
@@ -214,6 +235,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startCopy(e.Name, e.Size, activeFS, srcPath, dstFS, dstPath, dstPane)
 	}
 	return m, nil
+}
+
+// emaRate returns the exponentially-smoothed transfer rate (bytes/sec) given the
+// previous EMA, the bytes moved since the last sample, and the real elapsed
+// seconds. A zero or negative interval leaves the rate unchanged; the first
+// sample seeds the EMA directly.
+func emaRate(prevEMA, deltaBytes, elapsedSec float64) float64 {
+	if elapsedSec <= 0 {
+		return prevEMA
+	}
+	inst := deltaBytes / elapsedSec
+	if prevEMA == 0 {
+		return inst
+	}
+	return rateAlpha*inst + (1-rateAlpha)*prevEMA
 }
 
 // panelFor returns a pointer to the panel for the given pane id.

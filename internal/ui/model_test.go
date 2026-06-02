@@ -191,6 +191,39 @@ func TestModelCopyRejectsDirectory(t *testing.T) {
 	}
 }
 
+func TestEMARate(t *testing.T) {
+	// First sample seeds the EMA with the instantaneous rate.
+	if got := emaRate(0, 1_000_000, 1.0); got != 1_000_000 {
+		t.Errorf("first sample: got %v, want 1e6", got)
+	}
+	// Subsequent sample blends: alpha*inst + (1-alpha)*prev.
+	if got := emaRate(1_000_000, 2_000_000, 1.0); got != rateAlpha*2_000_000+(1-rateAlpha)*1_000_000 {
+		t.Errorf("blend: got %v", got)
+	}
+	// A non-positive interval leaves the rate unchanged (no divide-by-zero).
+	if got := emaRate(1_000_000, 500_000, 0); got != 1_000_000 {
+		t.Errorf("zero elapsed: got %v, want unchanged 1e6", got)
+	}
+}
+
+func TestFormatCopyStatus(t *testing.T) {
+	// Percentage shown when total known; rate shown once non-zero.
+	s := formatCopyStatus("file", 50, 100, 2*1024*1024)
+	for _, want := range []string{"Copying file…", "50%", "MB/s"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("status %q missing %q", s, want)
+		}
+	}
+	// No total → no percentage.
+	if s := formatCopyStatus("file", 0, 0, 0); strings.Contains(s, "%") {
+		t.Errorf("unknown total should omit percentage: %q", s)
+	}
+	// No rate yet → no rate suffix.
+	if s := formatCopyStatus("file", 50, 100, 0); strings.Contains(s, "/s") {
+		t.Errorf("zero rate should omit rate: %q", s)
+	}
+}
+
 func TestModelQuitKeys(t *testing.T) {
 	local := fs.NewLocal()
 	m := New(local, local, "/", "/")

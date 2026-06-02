@@ -2,7 +2,7 @@ package ui
 
 import (
 	"context"
-	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -24,7 +24,10 @@ func (m Model) startCopy(name string, total int64, srcFS fs.FS, srcPath string, 
 	m.copyName = name
 	m.copyTotal = total
 	m.copyDstPane = dstPane
-	m.status = fmt.Sprintf("Copying %s… 0%%", name)
+	m.rateEMA = 0
+	m.lastRateBytes = 0
+	m.lastRateSample = time.Now()
+	m.status = formatCopyStatus(name, 0, total, 0)
 
 	go func() {
 		// M4 has no mid-copy cancel binding; Ctrl+C tears the program down and
