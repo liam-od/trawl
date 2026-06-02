@@ -5,7 +5,6 @@
 package ui
 
 import (
-	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -52,15 +51,13 @@ type Model struct {
 	height     int
 	status     string
 
-	// Single in-flight copy. copying gates a second copy from starting; the
-	// channels stream progress and the final result from the copy goroutine.
-	copying      bool
+	// queue holds all transfers; one runs at a time. The channels stream the
+	// active transfer's progress and final result from its copy goroutine.
+	queue        *transferQueue
 	copyProgress chan transfer.CopyProgressMsg
 	copyResult   chan error
-	copyName     string
-	copyDstPane  int
 
-	// Transfer-rate state, sampled over real elapsed time and EMA-smoothed.
+	// Transfer-rate state for the active transfer, EMA-smoothed over real time.
 	rateEMA        float64   // bytes/sec, 0 until the first sample
 	lastRateBytes  int64     // cumulative bytes at the last rate sample
 	lastRateSample time.Time // wall-clock time of the last rate sample
@@ -76,6 +73,7 @@ func New(local, remote fs.FS, localStart, remoteStart string) Model {
 		localFS:    local,
 		remoteFS:   remote,
 		activePane: paneLocal,
+		queue:      &transferQueue{visible: true},
 	}
 }
 
@@ -120,9 +118,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case transfer.CopyProgressMsg:
-		if !m.copying {
-			return m, nil // stale sample from a finished copy
+		it := m.queue.active()
+		if it == nil {
+			return m, nil // stale sample from a finished transfer
 		}
+		it.written = msg.Written
+		it.total = msg.Total
 		// Recompute the rate only once per rateWindow, over the true elapsed time
 		// since the last sample, so the EMA averages over ~1s regardless of how
 		// often samples arrive.
@@ -132,22 +133,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastRateBytes = msg.Written
 			m.lastRateSample = now
 		}
-		m.status = formatCopyStatus(m.copyName, msg.Written, msg.Total, m.rateEMA)
 		return m, waitForCopy(m.copyProgress, m.copyResult)
 
 	case transfer.CopyDoneMsg:
-		m.copying = false
+		it := m.queue.active()
 		m.copyProgress = nil
 		m.copyResult = nil
-		if msg.Err != nil {
-			m.status = "copy failed: " + msg.Err.Error()
-			return m, nil
+		var cmds []tea.Cmd
+		if it != nil {
+			if msg.Err != nil {
+				it.status = statusFailed
+				it.err = msg.Err
+				m.status = "copy failed: " + msg.Err.Error()
+			} else {
+				it.status = statusDone
+				m.status = "copied " + it.name
+				// Refresh the destination panel so the new entry appears.
+				cmds = append(cmds, loadDir(m.fsFor(it.dstPane), it.dstPane, m.panelFor(it.dstPane).path))
+			}
 		}
-		m.status = fmt.Sprintf("copied %s", m.copyName)
-		// Refresh the destination panel so the new file appears; same path, so
-		// applyDirLoaded preserves the cursor.
-		dstFS := m.fsFor(m.copyDstPane)
-		return m, loadDir(dstFS, m.copyDstPane, m.panelFor(m.copyDstPane).path)
+		if next := m.startNext(); next != nil {
+			cmds = append(cmds, next)
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -214,11 +222,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m, loadDir(activeFS, m.activePane, active.path)
 
+	case "f7":
+		m.queue.visible = !m.queue.visible
+		entryH := m.entryAreaHeight()
+		m.local.ensureVisible(entryH)
+		m.remote.ensureVisible(entryH)
+
 	case "f5", "c":
-		if m.copying {
-			m.status = "copy already in progress"
-			return m, nil
-		}
 		e := active.selected()
 		if e == nil {
 			return m, nil
@@ -227,9 +237,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// transfer.Copy recurses when the source is a directory.
 		dstPane := 1 - m.activePane
 		dstFS := m.fsFor(dstPane)
-		srcPath := activeFS.Join(active.path, e.Name)
-		dstPath := dstFS.Join(m.panelFor(dstPane).path, e.Name)
-		return m.startCopy(e.Name, activeFS, srcPath, dstFS, dstPath, dstPane)
+		m.queue.enqueue(&queueItem{
+			name:    e.Name,
+			srcFS:   activeFS,
+			srcPath: activeFS.Join(active.path, e.Name),
+			dstFS:   dstFS,
+			dstPath: dstFS.Join(m.panelFor(dstPane).path, e.Name),
+			dstPane: dstPane,
+		})
+		m.queue.visible = true
+		if m.queue.active() == nil {
+			cmd := m.startNext()
+			return m, cmd
+		}
+		m.status = "queued " + e.Name
+		return m, nil
 	}
 	return m, nil
 }

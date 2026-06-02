@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/liam-od/trawl/internal/fs"
-	"github.com/liam-od/trawl/internal/transfer"
 )
 
 // drive applies a message and returns the concrete Model back.
@@ -112,6 +111,25 @@ func TestModelEnterOnDirIssuesLoad(t *testing.T) {
 	}
 }
 
+// run drives a command chain to completion, expanding tea.BatchMsg, and returns
+// the final model. It blocks on commands (e.g. waitForCopy) until their
+// goroutines produce, so use it only on flows that terminate.
+func run(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			m = run(t, m, c)
+		}
+		return m
+	}
+	next, c := m.Update(msg)
+	return run(t, next.(Model), c)
+}
+
 func TestModelCopyFlow(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
@@ -126,53 +144,32 @@ func TestModelCopyFlow(t *testing.T) {
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "f.bin", Size: int64(len(want))}}})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
 
-	// Copy the file under the (local) cursor toward the inactive (remote) pane.
+	// 'c' enqueues the file and starts the transfer; the queue panel shows.
 	m, cmd := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	if !m.copying {
-		t.Fatal("expected copying flag set after 'c'")
+	if m.queue.active() == nil {
+		t.Fatal("expected an active transfer after 'c'")
+	}
+	if !m.queueVisible() {
+		t.Error("queue panel should be visible during a copy")
 	}
 
-	// Pump the command chain to completion: progress samples re-issue the wait
-	// command; CopyDoneMsg ends it and triggers a destination refresh.
-	sawProgress, sawDone := false, false
-	for i := 0; cmd != nil && i < 10000; i++ {
-		msg := cmd()
-		switch msg.(type) {
-		case transfer.CopyProgressMsg:
-			sawProgress = true
-		case transfer.CopyDoneMsg:
-			sawDone = true
-		}
-		m, cmd = drive(t, m, msg)
-	}
+	m = run(t, m, cmd)
 
-	if !sawDone {
-		t.Fatal("copy never reported done")
+	if a := m.queue.active(); a != nil {
+		t.Errorf("transfer still active after completion: %+v", a)
 	}
-	if !sawProgress {
-		t.Error("copy reported no progress samples")
-	}
-	if m.copying {
-		t.Error("copying flag still set after completion")
+	if len(m.queue.items) != 1 || m.queue.items[0].status != statusDone {
+		t.Fatalf("queue item not marked done: %+v", m.queue.items)
 	}
 	if !strings.HasPrefix(m.status, "copied ") {
 		t.Errorf("status = %q, want a 'copied …' message", m.status)
 	}
-
 	got, err := os.ReadFile(filepath.Join(dstDir, "f.bin"))
 	if err != nil {
 		t.Fatalf("read copied file: %v", err)
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("copied bytes differ (%d vs %d)", len(got), len(want))
-	}
-
-	// A second copy attempt while one is in flight must be rejected — simulate
-	// by forcing the flag and pressing 'c' again.
-	m.copying = true
-	m, _ = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	if m.status != "copy already in progress" {
-		t.Errorf("re-entrant copy status = %q, want rejection", m.status)
 	}
 }
 
@@ -194,21 +191,15 @@ func TestModelCopyDirectory(t *testing.T) {
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "tree", IsDir: true}}})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
 
-	// Copying a directory now starts a recursive copy rather than being rejected.
+	// Copying a directory starts a recursive transfer.
 	m, cmd := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	if !m.copying {
+	if m.queue.active() == nil {
 		t.Fatal("directory copy should start")
 	}
-	sawDone := false
-	for i := 0; cmd != nil && i < 100000; i++ {
-		msg := cmd()
-		if _, ok := msg.(transfer.CopyDoneMsg); ok {
-			sawDone = true
-		}
-		m, cmd = drive(t, m, msg)
-	}
-	if !sawDone {
-		t.Fatal("directory copy never reported done")
+	m = run(t, m, cmd)
+
+	if m.queue.items[0].status != statusDone {
+		t.Fatalf("dir transfer not done: status=%v", m.queue.items[0].status)
 	}
 	got, err := os.ReadFile(filepath.Join(dstDir, "tree", "sub", "f.bin"))
 	if err != nil {
@@ -216,6 +207,46 @@ func TestModelCopyDirectory(t *testing.T) {
 	}
 	if !bytes.Equal(got, content) {
 		t.Error("copied tree file differs from source")
+	}
+}
+
+func TestModelQueueMultiple(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	for _, name := range []string{"a.bin", "b.bin"} {
+		if err := os.WriteFile(filepath.Join(srcDir, name), bytes.Repeat([]byte("z"), 2048), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	local := fs.NewLocal()
+	m := New(local, local, srcDir, dstDir)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "a.bin", Size: 2048}, {Name: "b.bin", Size: 2048}}})
+	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
+
+	// First 'c' starts a.bin; move the cursor down; second 'c' queues b.bin behind it.
+	m, cmd := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m, _ = drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m, cmd2 := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if len(m.queue.items) != 2 {
+		t.Fatalf("queue has %d items, want 2", len(m.queue.items))
+	}
+	if cmd2 != nil {
+		t.Error("second copy while one is active should be queued, not started")
+	}
+
+	m = run(t, m, cmd) // draining the first transfer starts the second via startNext
+
+	for _, it := range m.queue.items {
+		if it.status != statusDone {
+			t.Errorf("item %s status = %v, want done", it.name, it.status)
+		}
+	}
+	for _, name := range []string{"a.bin", "b.bin"} {
+		if _, err := os.ReadFile(filepath.Join(dstDir, name)); err != nil {
+			t.Errorf("copied %s missing: %v", name, err)
+		}
 	}
 }
 
@@ -234,21 +265,42 @@ func TestEMARate(t *testing.T) {
 	}
 }
 
-func TestFormatCopyStatus(t *testing.T) {
-	// Percentage shown when total known; rate shown once non-zero.
-	s := formatCopyStatus("file", 50, 100, 2*1024*1024)
-	for _, want := range []string{"Copying file…", "50%", "MB/s"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("status %q missing %q", s, want)
+func TestRenderProgressBar(t *testing.T) {
+	if got := renderProgressBar(0, 10); got != "[░░░░░░░░░░]" {
+		t.Errorf("0%%: %q", got)
+	}
+	if got := renderProgressBar(100, 10); got != "[██████████]" {
+		t.Errorf("100%%: %q", got)
+	}
+	if got := renderProgressBar(50, 10); got != "[█████░░░░░]" {
+		t.Errorf("50%%: %q", got)
+	}
+	// Out-of-range percentages clamp rather than overflow the bar.
+	if got := renderProgressBar(150, 4); got != "[████]" {
+		t.Errorf(">100%% should clamp: %q", got)
+	}
+}
+
+func TestModelViewShowsQueue(t *testing.T) {
+	local := fs.NewLocal()
+	m := New(local, local, "/a", "/b")
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m.queue.items = []*queueItem{
+		{name: "report.pdf", dstPane: paneRemote, status: statusDone},
+		{name: "video.mp4", dstPane: paneLocal, status: statusActive, written: 50, total: 100},
+	}
+	out := m.View()
+	for _, want := range []string{"Transfer queue", "report.pdf", "video.mp4", "50%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("queue panel missing %q\n%s", want, out)
 		}
 	}
-	// No total → no percentage.
-	if s := formatCopyStatus("file", 0, 0, 0); strings.Contains(s, "%") {
-		t.Errorf("unknown total should omit percentage: %q", s)
-	}
-	// No rate yet → no rate suffix.
-	if s := formatCopyStatus("file", 50, 100, 0); strings.Contains(s, "/s") {
-		t.Errorf("zero rate should omit rate: %q", s)
+
+	// F7 hides the panel even with items present.
+	m, _ = drive(t, m, tea.KeyMsg{Type: tea.KeyF7})
+	if strings.Contains(m.View(), "Transfer queue") {
+		t.Error("queue panel should be hidden after F7")
 	}
 }
 

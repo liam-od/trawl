@@ -40,13 +40,23 @@ var (
 )
 
 // entryAreaHeight is the number of entry rows each panel can show: terminal
-// height minus the status bar, the two borders, and the title line.
+// height minus the status bar, the two borders, the title line, and the queue
+// panel when it is showing.
 func (m Model) entryAreaHeight() int {
 	h := m.height - statusLines - panelBorders - titleLines
+	if m.queueVisible() {
+		h -= m.queuePanelHeight()
+	}
 	if h < 1 {
 		return 1
 	}
 	return h
+}
+
+// queueVisible reports whether the queue panel should be drawn: the user hasn't
+// hidden it and there is at least one transfer to show.
+func (m Model) queueVisible() bool {
+	return m.queue != nil && m.queue.visible && len(m.queue.items) > 0
 }
 
 // View renders the full frame: two panels side by side over a status bar.
@@ -73,7 +83,12 @@ func (m Model) View() string {
 	right := renderPanel(m.remote, "REMOTE", contentW, contentH, entryH)
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	return lipgloss.JoinVertical(lipgloss.Left, panels, m.renderStatus())
+	parts := []string{panels}
+	if m.queueVisible() {
+		parts = append(parts, m.renderQueuePanel())
+	}
+	parts = append(parts, m.renderStatus())
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func renderPanel(p panel, label string, width, height, entryH int) string {
@@ -163,21 +178,132 @@ func formatSize(b int64) string {
 	return fmt.Sprintf("%.1f%cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// formatCopyStatus builds the status-bar line for an in-flight copy: a percentage
-// when the total is known, and the smoothed rate once the first sample exists.
-func formatCopyStatus(name string, written, total int64, rateBytesPerSec float64) string {
-	s := "Copying " + name + "…"
-	if total > 0 {
-		s += fmt.Sprintf(" %d%%", written*100/total)
+// maxQueueRows caps how many transfer rows the queue panel shows at once.
+const maxQueueRows = 8
+
+// queuePanelHeight is the queue panel's total height: one row per shown item
+// (capped at maxQueueRows), plus the title line and the top/bottom border. It
+// grows with the queue so a single transfer gets a compact panel rather than a
+// fixed block of blank rows.
+func (m Model) queuePanelHeight() int {
+	n := len(m.queue.items)
+	if n > maxQueueRows {
+		n = maxQueueRows
 	}
-	if rateBytesPerSec > 0 {
-		s += "  " + formatSize(int64(rateBytesPerSec)) + "/s"
+	return n + 3 // title + top border + bottom border
+}
+
+var (
+	queueBorderStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240"))
+	queueTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	pendingRowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	doneRowStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	failedRowStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+)
+
+// renderQueuePanel draws the transfer queue: a fixed-height bordered panel with
+// one row per item, scrolled to keep the active transfer in view.
+func (m Model) renderQueuePanel() string {
+	innerW := m.width - 2
+	if innerW < 4 {
+		innerW = 4
 	}
-	return s
+	items := m.queue.items
+	title := queueTitleStyle.Width(innerW).Render(fmt.Sprintf("Transfer queue (%d)", len(items)))
+
+	window := len(items)
+	if window > maxQueueRows {
+		window = maxQueueRows
+	}
+	start := queueStart(items)
+
+	rows := make([]string, 0, window)
+	for _, it := range items[start : start+window] {
+		rows = append(rows, renderQueueRow(it, m.rateEMA, innerW))
+	}
+
+	content := title + "\n" + strings.Join(rows, "\n")
+	return queueBorderStyle.Width(innerW).Render(content)
+}
+
+// queueStart picks the first row index to display so the active item (or, if
+// none is active, the last item) stays visible.
+func queueStart(items []*queueItem) int {
+	if len(items) <= maxQueueRows {
+		return 0
+	}
+	focus := len(items) - 1
+	for i, it := range items {
+		if it.status == statusActive {
+			focus = i
+			break
+		}
+	}
+	start := focus - maxQueueRows/2
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := len(items) - maxQueueRows; start > maxStart {
+		start = maxStart
+	}
+	return start
+}
+
+func renderQueueRow(it *queueItem, rateEMA float64, width int) string {
+	arrow := "←" // destination is local: a download
+	if it.dstPane == paneRemote {
+		arrow = "→"
+	}
+	switch it.status {
+	case statusActive:
+		var pct int64
+		if it.total > 0 {
+			pct = it.written * 100 / it.total
+		}
+		rate := ""
+		if rateEMA > 0 {
+			rate = "  " + formatSize(int64(rateEMA)) + "/s"
+		}
+		text := fmt.Sprintf(" ▶ %s %s %s %3d%%%s", arrow, it.name, renderProgressBar(pct, 16), pct, rate)
+		return lipgloss.NewStyle().Width(width).Render(clip(text, width))
+	case statusDone:
+		return doneRowStyle.Width(width).Render(clip(fmt.Sprintf(" ✓ %s %s", arrow, it.name), width))
+	case statusFailed:
+		reason := "failed"
+		if it.err != nil {
+			reason = it.err.Error()
+		}
+		return failedRowStyle.Width(width).Render(clip(fmt.Sprintf(" ✗ %s %s: %s", arrow, it.name, reason), width))
+	default: // pending
+		return pendingRowStyle.Width(width).Render(clip(fmt.Sprintf(" · %s %s", arrow, it.name), width))
+	}
+}
+
+func renderProgressBar(pct int64, width int) string {
+	filled := int(pct) * width / 100
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
+}
+
+// clip truncates s to at most width runes, adding an ellipsis when it overflows.
+func clip(s string, width int) string {
+	r := []rune(s)
+	if len(r) <= width {
+		return s
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return string(r[:width-1]) + "…"
 }
 
 func (m Model) renderStatus() string {
-	const hints = "[Tab] switch  [Enter] open  [F5/c] copy  [Backspace] up  [r] refresh  [q] quit"
+	const hints = "[Tab] switch  [Enter] open  [F5/c] copy  [F7] queue  [Backspace] up  [r] refresh  [q] quit"
 	text := hints
 	if m.status != "" {
 		text = m.status + "  |  " + hints
