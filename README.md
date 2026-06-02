@@ -6,23 +6,55 @@ single keystroke. One static binary, secure defaults, no daemon.
 
 ## Install
 
-Requires Go 1.26 to build (the result is a static, CGO-free binary).
+`trawl` ships as a single static binary — no runtime, no dependencies.
+
+### Linux (one-liner)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/liam-od/trawl/main/install.sh | sh
+```
+
+This downloads the latest release into `/usr/local/bin` (using `sudo` if needed). To install
+somewhere on your own `PATH` without `sudo`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/liam-od/trawl/main/install.sh | BIN_DIR="$HOME/.local/bin" sh
+```
+
+### Manual download
+
+Grab the binary for your platform from the
+[latest release](https://github.com/liam-od/trawl/releases/latest):
+
+| Platform      | File                        |
+|---------------|-----------------------------|
+| Linux (amd64) | `trawl-linux-amd64`         |
+| Windows (amd64) | `trawl-windows-amd64.exe` |
+
+On Linux, mark it executable and move it onto your `PATH`:
+
+```sh
+chmod +x trawl-linux-amd64
+sudo mv trawl-linux-amd64 /usr/local/bin/trawl
+```
+
+On Windows, drop `trawl-windows-amd64.exe` somewhere on your `PATH` (rename to `trawl.exe` if you
+like) and run it from a terminal.
+
+### From source
+
+Requires Go 1.26 (the result is a static, CGO-free binary):
+
+```sh
+go install github.com/liam-od/trawl/cmd/trawl@latest    # → $GOBIN
+```
+
+or clone and build:
 
 ```sh
 git clone https://github.com/liam-od/trawl
 cd trawl
 make build            # → bin/trawl
-```
-
-Or install straight to your `$GOBIN`:
-
-```sh
-go install github.com/liam-od/trawl/cmd/trawl@latest
-```
-
-Cross-compile (Linux and Windows amd64):
-
-```sh
 make build-all        # → bin/trawl-linux-amd64, bin/trawl-windows-amd64.exe
 ```
 
