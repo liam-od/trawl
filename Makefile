@@ -4,6 +4,8 @@ BIN_DIR := bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+export CGO_ENABLED := 0
+
 .PHONY: all build run test fmt vet tidy clean build-all help
 
 all: build
