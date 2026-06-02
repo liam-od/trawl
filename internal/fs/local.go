@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 )
 
-// localFS is an FS backed by the local operating-system filesystem.
+// localFS implements FS over the local OS filesystem, joining paths with the
+// host separator (path/filepath, not path).
 type localFS struct{}
 
 // NewLocal returns an FS backed by the local operating-system filesystem.
