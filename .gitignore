@@ -8,5 +8,5 @@
 coverage.*
 
 # planning
-*.md
-!README.md
+#*.md
+#!README.md
