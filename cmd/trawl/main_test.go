@@ -181,6 +181,52 @@ func TestUnknownAliasExitsOne(t *testing.T) {
 	}
 }
 
+func TestTransferBadJSON(t *testing.T) {
+	code, _, errOut := runArgs(t, "--transfer", "{not json}")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "transfer spec") {
+		t.Errorf("expected a parse error, got:\n%s", errOut)
+	}
+}
+
+func TestTransferUnknownHost(t *testing.T) {
+	// A well-formed spec naming a host that isn't saved fails before any
+	// connection attempt.
+	code, _, errOut := runArgs(t, "--transfer", `{"name":"nope","type":"remote_to_local","object":"x"}`)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "no saved host") {
+		t.Errorf("expected a no-saved-host error, got:\n%s", errOut)
+	}
+}
+
+func TestHelpMentionsTransfer(t *testing.T) {
+	_, _, errOut := runArgs(t, "--help")
+	if !strings.Contains(errOut, "--transfer") {
+		t.Errorf("help output missing --transfer:\n%s", errOut)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	cases := map[int64]string{
+		0:                  "0 B",
+		512:                "512 B",
+		1024:               "1.0 KiB",
+		1536:               "1.5 KiB",
+		1024 * 1024:        "1.0 MiB",
+		3 * 1024 * 1024:    "3.0 MiB",
+		1024 * 1024 * 1024: "1.0 GiB",
+	}
+	for in, want := range cases {
+		if got := humanBytes(in); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSavedHostFlagOverride(t *testing.T) {
 	// --port beats the saved host's port. resolveArg sets target.Port; mergeSettings
 	// then lets the explicit flag win.
