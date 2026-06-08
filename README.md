@@ -97,6 +97,33 @@ trawl prod        # connects; panels open in the saved directories
 
 Settings resolve as: command-line flag, then saved host, then global default, then built-in default.
 
+### Scripted transfers
+
+`--transfer` runs a single copy without the TUI, driven by a JSON object — handy for cron jobs and
+scripts. It names a saved host and a direction; the paths default to that host's configured
+`remote_dir` / `local_dir`, so the common case is just an object name:
+
+```sh
+# download remote_dir/film.mkv → local_dir/film.mkv for the saved host "box"
+trawl --transfer '{"name":"box","type":"remote_to_local","object":"film.mkv"}'
+
+# upload local_dir/backup.tar.gz → remote_dir/backup.tar.gz
+trawl --transfer '{"name":"box","type":"local_to_remote","object":"backup.tar.gz"}'
+```
+
+| Field         | Meaning                                                                  |
+|---------------|--------------------------------------------------------------------------|
+| `name`        | saved host to connect to (**required**)                                  |
+| `type`        | `remote_to_local` (download) or `local_to_remote` (upload) (**required**)|
+| `object`      | file or directory within the base dir; omit to transfer the whole dir    |
+| `remote_path` | override the host's `remote_dir` base for this transfer                   |
+| `local_path`  | override the host's `local_dir` base for this transfer                    |
+
+A directory `object` is copied recursively. Connection settings (key, port, password) resolve the
+same way as an interactive session, so flags still apply. Progress is shown as a live line when
+stderr is a terminal and suppressed when it's piped or redirected; the final `done:` summary is
+printed to stdout.
+
 ### Authentication
 
 The SSH agent is tried first, then a key file (`--key`, or `key_path` from setup), then an
@@ -134,6 +161,7 @@ rate. Press `F5`/`c` again while one is running to queue more.
 --known-hosts P   known_hosts file (default ~/.ssh/known_hosts)
 --config PATH     config file (default ~/.config/trawl/config.json)
 --setup           manage saved hosts and global defaults, then exit
+--transfer JSON   run one JSON-described transfer headlessly, then exit
 --version         print version and exit
 --help            show this help and exit
 ```
