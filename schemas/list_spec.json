@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "side"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Saved host alias to connect to"
+    },
+    "side": {
+      "type": "string",
+      "enum": ["remote", "local"],
+      "description": "Which side's directory to walk: remote or local"
+    },
+    "path": {
+      "type": "string",
+      "description": "Override the host's remote_dir/local_dir base for this listing (absolute or ~)"
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Max levels to recurse below the base dir; omit or 0 for no limit"
+    }
+  }
+}

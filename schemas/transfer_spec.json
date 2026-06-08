@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "type", "object"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Saved host alias to connect to"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["remote_to_local", "local_to_remote"],
+      "description": "remote_to_local = download, local_to_remote = upload"
+    },
+    "object": {
+      "type": "string",
+      "description": "File or directory within the host's base dir; omit to transfer the whole dir. Relative only: no leading slash, no '..' segment.",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "remote_path": {
+      "type": "string",
+      "description": "Override the host's remote_dir base for this transfer"
+    },
+    "local_path": {
+      "type": "string",
+      "description": "Override the host's local_dir base for this transfer"
+    }
+  }
+}

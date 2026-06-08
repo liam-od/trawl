@@ -210,6 +210,46 @@ func TestHelpMentionsTransfer(t *testing.T) {
 	}
 }
 
+func TestListBadJSON(t *testing.T) {
+	code, _, errOut := runArgs(t, "--list", "{not json}")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "list spec") {
+		t.Errorf("expected a parse error, got:\n%s", errOut)
+	}
+}
+
+func TestListUnknownHost(t *testing.T) {
+	// A well-formed spec naming a host that isn't saved fails before any
+	// connection attempt.
+	code, _, errOut := runArgs(t, "--list", `{"name":"nope","side":"remote"}`)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "no saved host") {
+		t.Errorf("expected a no-saved-host error, got:\n%s", errOut)
+	}
+}
+
+func TestListAndTransferMutuallyExclusive(t *testing.T) {
+	code, _, errOut := runArgs(t, "--transfer", `{"name":"a","type":"remote_to_local"}`,
+		"--list", `{"name":"a","side":"remote"}`)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "mutually exclusive") {
+		t.Errorf("expected a mutual-exclusion error, got:\n%s", errOut)
+	}
+}
+
+func TestHelpMentionsList(t *testing.T) {
+	_, _, errOut := runArgs(t, "--help")
+	if !strings.Contains(errOut, "--list") {
+		t.Errorf("help output missing --list:\n%s", errOut)
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	cases := map[int64]string{
 		0:                  "0 B",

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "snitch": {
+      "command": "uv",
+      "args": ["run", "--directory", "/home/liam/workspace/snitch", "snitch"],
+      "env": {
+        "SNITCH_SCHEMA_ROOT": "/home/liam/workspace/trawl/schemas"
+      }
+    }
+  }
+}

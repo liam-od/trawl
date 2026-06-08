@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/liam-od/trawl/internal/job"
 	"github.com/liam-od/trawl/internal/sshx"
 	"github.com/liam-od/trawl/internal/transfer"
+	"github.com/liam-od/trawl/internal/tree"
 	"github.com/liam-od/trawl/internal/ui"
 )
 
@@ -55,6 +57,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		configPath     = fset.String("config", defaultConfigPath(), "config file path")
 		setup          = fset.Bool("setup", false, "run the interactive setup wizard and exit")
 		transferSpec   = fset.String("transfer", "", "run a single JSON-described transfer and exit (no TUI)")
+		listSpec       = fset.String("list", "", "list a JSON-described directory tree and exit (no TUI)")
 		showVersion    = fset.Bool("version", false, "print version and exit")
 	)
 
@@ -89,10 +92,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		set:        set,
 	}
 
-	// --transfer runs one JSON-described copy headlessly and exits, instead of
-	// taking a positional target and starting the TUI.
+	// --transfer and --list each run one JSON-described operation headlessly and
+	// exit, instead of taking a positional target and starting the TUI. They are
+	// mutually exclusive.
+	if *transferSpec != "" && *listSpec != "" {
+		fmt.Fprintln(stderr, "error: --transfer and --list are mutually exclusive")
+		return 1
+	}
 	if *transferSpec != "" {
 		return runTransfer(*transferSpec, *configPath, *knownHosts, flags, stdout, stderr)
+	}
+	if *listSpec != "" {
+		return runList(*listSpec, *configPath, *knownHosts, flags, stdout, stderr)
 	}
 
 	rest := fset.Args()
@@ -329,29 +340,8 @@ func connectAndTransfer(target sshx.Target, cfg sshx.Config, spec job.Spec, loca
 	}
 	defer sess.Close()
 
-	remoteHome, err := sess.SFTP.Getwd()
-	if err != nil {
-		remoteHome = "/"
-	}
-	remoteBase := target.Path // the saved host's remote_dir
-	if spec.RemotePath != "" {
-		remoteBase = spec.RemotePath
-	}
-	if remoteBase == "" {
-		remoteBase = remoteHome
-	} else {
-		remoteBase = expandRemoteHome(remoteBase, remoteHome)
-	}
-
-	localBase := localStart // the saved host's local_dir, already ~-expanded
-	if spec.LocalPath != "" {
-		localBase = expandHome(spec.LocalPath)
-	}
-	if localBase == "" {
-		if localBase, err = os.Getwd(); err != nil {
-			localBase = "."
-		}
-	}
+	remoteBase := resolveRemoteBase(sess, spec.RemotePath, target.Path)
+	localBase := resolveLocalBase(spec.LocalPath, localStart)
 
 	remotePath, localPath, srcIsRemote := spec.Resolve(remoteBase, localBase)
 	localFS, remoteFS := fs.NewLocal(), fs.NewSFTP(sess.SFTP)
@@ -376,6 +366,135 @@ func connectAndTransfer(target sshx.Target, cfg sshx.Config, spec job.Spec, loca
 	}
 
 	return runCopy(ctx, src, srcPath, dst, dstPath, name, stdout, stderr)
+}
+
+// resolveRemoteBase picks the remote base directory for a headless operation:
+// the override if given, else the saved host's remote_dir (hostDir), else the
+// server home. A leading ~ is expanded against the server home, which is only
+// knowable after connecting.
+func resolveRemoteBase(sess *sshx.Session, override, hostDir string) string {
+	remoteHome, err := sess.SFTP.Getwd()
+	if err != nil {
+		remoteHome = "/"
+	}
+	base := hostDir
+	if override != "" {
+		base = override
+	}
+	if base == "" {
+		return remoteHome
+	}
+	return expandRemoteHome(base, remoteHome)
+}
+
+// resolveLocalBase picks the local base directory: the override (with a leading
+// ~ expanded against the local home) if given, else the saved host's local_dir
+// (hostDir, already ~-expanded by the caller), else the working directory.
+func resolveLocalBase(override, hostDir string) string {
+	if override != "" {
+		return expandHome(override)
+	}
+	if hostDir != "" {
+		return hostDir
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
+// runList handles --list: it parses the JSON spec, resolves the named saved host
+// through the same flag>host>default merge the TUI path uses, and walks one side
+// of it headlessly. It returns the process exit code.
+func runList(specJSON, configPath, knownHosts string, flags cliFlags, stdout, stderr io.Writer) int {
+	spec, err := job.ParseList(specJSON)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fileCfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Like --transfer, a list spec always names a saved host (its default dirs are
+	// the point), so reject anything that isn't one rather than falling through to
+	// live-target parsing.
+	if _, ok := fileCfg.Host(spec.Name); !ok {
+		fmt.Fprintf(stderr, "error: no saved host %q (run trawl --setup to add one)\n", spec.Name)
+		return 1
+	}
+
+	target, localStart, fileCfg, err := resolveArg(spec.Name, fileCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	target, cfg, wantPassword, err := mergeSettings(target, fileCfg, flags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if wantPassword {
+		cfg.PasswordPrompt = passwordPrompt
+	}
+	cfg.KeyPath = expandHome(cfg.KeyPath)
+	cfg.KnownHostsPath = expandHome(knownHosts)
+	cfg.HostKeyPrompt = hostKeyPrompt
+
+	if err := connectAndList(target, cfg, spec, localStart, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// listOutput is the JSON emitted by --list: the resolved base directory and its
+// recursive contents (the base dir's own entries, dirs-first then alphabetical).
+type listOutput struct {
+	Path string      `json:"path"`
+	Tree []tree.Node `json:"tree"`
+}
+
+// connectAndList walks one side's base directory into a tree and writes it to
+// stdout as JSON. A local listing needs no network, so it skips the SSH session
+// entirely; only a remote listing connects. The remote base is the host's
+// remote_dir (on target.Path) unless the spec overrides it, with a leading ~
+// expanded against the server home; the local base is the host's local_dir
+// unless overridden.
+func connectAndList(target sshx.Target, cfg sshx.Config, spec job.ListSpec, localStart string, stdout, stderr io.Writer) error {
+	if spec.Side == job.SideLocal {
+		base := resolveLocalBase(spec.Path, localStart)
+		return writeList(stdout, fs.NewLocal(), base, spec.Depth)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	sess, err := sshx.Connect(ctx, target, cfg)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer sess.Close()
+
+	base := resolveRemoteBase(sess, spec.Path, target.Path)
+	return writeList(stdout, fs.NewSFTP(sess.SFTP), base, spec.Depth)
+}
+
+// writeList builds the tree under base on fsys and encodes it to w as indented
+// JSON.
+func writeList(w io.Writer, fsys fs.FS, base string, depth int) error {
+	nodes, err := tree.Build(fsys, base, depth)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(listOutput{Path: base, Tree: nodes})
 }
 
 // runCopy streams one transfer to completion, rendering a live progress line to
@@ -573,6 +692,7 @@ Flags:
   --config PATH     config file (default ~/.config/trawl/config.json)
   --setup           manage saved hosts and global defaults, then exit
   --transfer JSON   run one JSON-described transfer headlessly, then exit
+  --list JSON       print one JSON-described directory tree, then exit
   --version         print version and exit
   --help            show this help and exit
 
@@ -588,4 +708,14 @@ back to that host's configured remote_dir/local_dir:
   object       file or directory within the base dir to move (default: whole dir)
   remote_path  override the host's remote_dir base for this transfer (optional)
   local_path   override the host's local_dir base for this transfer (optional)
+
+--list takes a JSON object naming a saved host and a side; it prints that side's
+base directory and a recursive tree of its contents as JSON on stdout:
+
+  {"name":"box","side":"remote","path":"/srv/media","depth":2}
+
+  name         saved host to connect to (required)
+  side         remote or local — which side's directory to walk (required)
+  path         override the host's remote_dir/local_dir base (optional)
+  depth        max levels to recurse below the base; omit/0 for no limit (optional)
 `
