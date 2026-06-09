@@ -26,6 +26,7 @@ import (
 	"github.com/liam-od/trawl/internal/config"
 	"github.com/liam-od/trawl/internal/fs"
 	"github.com/liam-od/trawl/internal/job"
+	"github.com/liam-od/trawl/internal/media"
 	"github.com/liam-od/trawl/internal/sshx"
 	"github.com/liam-od/trawl/internal/transfer"
 	"github.com/liam-od/trawl/internal/tree"
@@ -58,6 +59,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		setup          = fset.Bool("setup", false, "run the interactive setup wizard and exit")
 		transferSpec   = fset.String("transfer", "", "run a single JSON-described transfer and exit (no TUI)")
 		listSpec       = fset.String("list", "", "list a JSON-described directory tree and exit (no TUI)")
+		sortSpec       = fset.String("sort", "", "run a JSON-described local media sort and exit (no TUI)")
 		showVersion    = fset.Bool("version", false, "print version and exit")
 	)
 
@@ -92,11 +94,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		set:        set,
 	}
 
-	// --transfer and --list each run one JSON-described operation headlessly and
-	// exit, instead of taking a positional target and starting the TUI. They are
-	// mutually exclusive.
-	if *transferSpec != "" && *listSpec != "" {
-		fmt.Fprintln(stderr, "error: --transfer and --list are mutually exclusive")
+	// --transfer, --list and --sort each run one JSON-described operation
+	// headlessly and exit, instead of taking a positional target and starting the
+	// TUI. They are mutually exclusive.
+	headless := 0
+	for _, s := range []string{*transferSpec, *listSpec, *sortSpec} {
+		if s != "" {
+			headless++
+		}
+	}
+	if headless > 1 {
+		fmt.Fprintln(stderr, "error: --transfer, --list and --sort are mutually exclusive")
 		return 1
 	}
 	if *transferSpec != "" {
@@ -104,6 +112,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *listSpec != "" {
 		return runList(*listSpec, *configPath, *knownHosts, flags, stdout, stderr)
+	}
+	if *sortSpec != "" {
+		return runSort(*sortSpec, stdout, stderr)
 	}
 
 	rest := fset.Args()
@@ -497,6 +508,41 @@ func writeList(w io.Writer, fsys fs.FS, base string, depth int) error {
 	return enc.Encode(listOutput{Path: base, Tree: nodes})
 }
 
+// runSort handles --sort: it parses the JSON plan and relocates each file from
+// the inbox into the library. Unlike --transfer and --list this is a purely
+// local operation, so it loads no config and opens no SSH session. It reports
+// one line per move to stdout (errors to stderr) plus a final tally, and returns
+// a non-zero exit code if any move failed.
+func runSort(specJSON string, stdout, stderr io.Writer) int {
+	plan, err := job.ParseSortPlan(specJSON)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	inbox := expandHome(plan.Inbox)
+	library := expandHome(plan.Library)
+	results := media.Sort(ctx, inbox, library, plan.Moves)
+
+	for _, r := range results {
+		if r.Err != nil {
+			fmt.Fprintf(stderr, "error: %s: %v\n", r.Src, r.Err)
+		} else {
+			fmt.Fprintf(stdout, "moved: %s -> %s\n", r.Src, r.Dest)
+		}
+	}
+
+	moved, failed := media.Summary(results)
+	fmt.Fprintf(stdout, "done: %d moved, %d failed\n", moved, failed)
+	if failed > 0 {
+		return 1
+	}
+	return 0
+}
+
 // runCopy streams one transfer to completion, rendering a live progress line to
 // stderr when it is a terminal and otherwise staying silent until the end. A
 // successful transfer prints one summary line to stdout; an error is returned
@@ -693,6 +739,7 @@ Flags:
   --setup           manage saved hosts and global defaults, then exit
   --transfer JSON   run one JSON-described transfer headlessly, then exit
   --list JSON       print one JSON-described directory tree, then exit
+  --sort JSON       run one JSON-described local media sort, then exit
   --version         print version and exit
   --help            show this help and exit
 
@@ -718,4 +765,15 @@ base directory and a recursive tree of its contents as JSON on stdout:
   side         remote or local — which side's directory to walk (required)
   path         override the host's remote_dir/local_dir base (optional)
   depth        max levels to recurse below the base; omit/0 for no limit (optional)
+
+--sort takes a JSON object with two local base directories and a list of moves;
+it relocates each src (under inbox) to its dest (under library), local-to-local,
+falling back to copy-then-delete across a filesystem boundary:
+
+  {"inbox":"~/Inbox","library":"~/Server/Library",
+   "moves":[{"src":"film.2020.mkv","dest":"Movies/Film (2020)/film.2020.mkv"}]}
+
+  inbox        directory new media lands in; each move's src is relative to it (required)
+  library      sorted library root; each move's dest is relative to it (required)
+  moves        list of {src, dest} relocations, both relative paths (required)
 `

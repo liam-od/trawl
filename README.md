@@ -124,6 +124,16 @@ same way as an interactive session, so flags still apply. Progress is shown as a
 stderr is a terminal and suppressed when it's piped or redirected; the final `done:` summary is
 printed to stdout.
 
+### Skills
+
+trawl ships agent skills that drive the headless flags from plain language:
+
+- **`/transfer`** — download or upload a file.
+- **`/sort`** — file new media into your library by its existing layout.
+
+Each builds the operation, validates it against a schema, then runs trawl — nothing moves without a
+checked plan.
+
 ### Authentication
 
 The SSH agent is tried first, then a key file (`--key`, or `key_path` from setup), then an
@@ -162,6 +172,8 @@ rate. Press `F5`/`c` again while one is running to queue more.
 --config PATH     config file (default ~/.config/trawl/config.json)
 --setup           manage saved hosts and global defaults, then exit
 --transfer JSON   run one JSON-described transfer headlessly, then exit
+--list JSON       list a JSON-described directory tree headlessly, then exit
+--sort JSON       run a JSON-described local media sort headlessly, then exit
 --version         print version and exit
 --help            show this help and exit
 ```

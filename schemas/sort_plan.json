@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["inbox", "library", "moves"],
+  "properties": {
+    "inbox": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Base directory new media lands in (absolute or ~). Each move's 'src' is relative to this."
+    },
+    "library": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Sorted library root (absolute or ~). Each move's 'dest' is relative to this."
+    },
+    "moves": {
+      "type": "array",
+      "description": "Relocations to perform, in order. May be empty (nothing to sort).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["src", "dest"],
+        "properties": {
+          "src": {
+            "type": "string",
+            "description": "File or directory within the inbox to move. Relative only: no leading slash, no '..' segment.",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          },
+          "dest": {
+            "type": "string",
+            "description": "Destination within the library, including the final folder/filename. Relative only: no leading slash, no '..' segment.",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          }
+        }
+      }
+    }
+  }
+}
