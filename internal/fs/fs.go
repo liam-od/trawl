@@ -17,11 +17,18 @@ type Entry struct {
 	Mode  iofs.FileMode
 }
 
+// SkipDir, returned from a WalkFunc for a directory entry, tells Walk to skip
+// that directory's subtree without descending into it; the walk then continues
+// with the next sibling. It mirrors (and equals) io/fs.SkipDir, so both walker
+// backends recognise it. Returned for a non-directory it skips the rest of the
+// containing directory, so to skip a single file return nil instead.
+var SkipDir = iofs.SkipDir
+
 // WalkFunc is called for each entry under a walk root, including the root
 // itself. rel is the entry's path relative to the root, always forward-slash
 // separated regardless of platform ("" for the root). A non-nil err reports a
 // failure reading that path; returning a non-nil error from the callback stops
-// the walk and Walk returns it.
+// the walk and Walk returns it, except SkipDir, which prunes rather than stops.
 type WalkFunc func(rel string, entry Entry, err error) error
 
 // FS is the common interface over the local and remote filesystems. Paths are

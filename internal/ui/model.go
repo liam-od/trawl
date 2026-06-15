@@ -51,6 +51,10 @@ type Model struct {
 	height     int
 	status     string
 
+	// exclude holds the base-name globs pruned from directory transfers,
+	// passed straight to transfer.Copy.
+	exclude []string
+
 	// queue holds all transfers; one runs at a time. The channels stream the
 	// active transfer's progress and final result from its copy goroutine.
 	queue        *transferQueue
@@ -66,13 +70,14 @@ type Model struct {
 // New builds a Model with each panel rooted at the given start path. The two
 // filesystems are supplied by the caller (local disk and/or a remote SFTP
 // server); the model never constructs them itself.
-func New(local, remote fs.FS, localStart, remoteStart string) Model {
+func New(local, remote fs.FS, localStart, remoteStart string, exclude []string) Model {
 	return Model{
 		local:      panel{path: localStart, active: true},
 		remote:     panel{path: remoteStart},
 		localFS:    local,
 		remoteFS:   remote,
 		activePane: paneLocal,
+		exclude:    exclude,
 		queue:      &transferQueue{visible: true},
 	}
 }

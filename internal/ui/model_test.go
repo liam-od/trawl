@@ -25,7 +25,7 @@ func drive(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
 
 func TestModelInitLoadsBothPanes(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, ".", ".")
+	m := New(local, local, ".", ".", nil)
 	if m.Init() == nil {
 		t.Fatal("Init returned nil command, want batched directory loads")
 	}
@@ -33,7 +33,7 @@ func TestModelInitLoadsBothPanes(t *testing.T) {
 
 func TestModelDirLoadedAndNavigation(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, "/start", "/remote")
+	m := New(local, local, "/start", "/remote", nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	loaded := dirLoadedMsg{
@@ -74,7 +74,7 @@ func TestModelDirLoadedAndNavigation(t *testing.T) {
 
 func TestModelResizeKeepsCursorVisible(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, "/start", "/remote")
+	m := New(local, local, "/start", "/remote", nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 40})
 
 	es := make([]fs.Entry, 30)
@@ -101,7 +101,7 @@ func TestModelResizeKeepsCursorVisible(t *testing.T) {
 
 func TestModelEnterOnDirIssuesLoad(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, "/start", "/remote")
+	m := New(local, local, "/start", "/remote", nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: "/start", entries: []fs.Entry{{Name: "sub", IsDir: true}}})
 
@@ -139,7 +139,7 @@ func TestModelCopyFlow(t *testing.T) {
 	}
 
 	local := fs.NewLocal()
-	m := New(local, local, srcDir, dstDir)
+	m := New(local, local, srcDir, dstDir, nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "f.bin", Size: int64(len(want))}}})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
@@ -186,7 +186,7 @@ func TestModelCopyDirectory(t *testing.T) {
 	}
 
 	local := fs.NewLocal()
-	m := New(local, local, srcDir, dstDir)
+	m := New(local, local, srcDir, dstDir, nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "tree", IsDir: true}}})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
@@ -220,7 +220,7 @@ func TestModelQueueMultiple(t *testing.T) {
 	}
 
 	local := fs.NewLocal()
-	m := New(local, local, srcDir, dstDir)
+	m := New(local, local, srcDir, dstDir, nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "a.bin", Size: 2048}, {Name: "b.bin", Size: 2048}}})
 	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
@@ -283,7 +283,7 @@ func TestRenderProgressBar(t *testing.T) {
 
 func TestModelViewShowsQueue(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, "/a", "/b")
+	m := New(local, local, "/a", "/b", nil)
 	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	m.queue.items = []*queueItem{
@@ -306,7 +306,7 @@ func TestModelViewShowsQueue(t *testing.T) {
 
 func TestModelQuitKeys(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, "/", "/")
+	m := New(local, local, "/", "/", nil)
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyRunes, Runes: []rune{'q'}},
 		{Type: tea.KeyCtrlC},
@@ -319,7 +319,7 @@ func TestModelQuitKeys(t *testing.T) {
 
 func TestModelViewRenders(t *testing.T) {
 	local := fs.NewLocal()
-	m := New(local, local, "/home/user", "/tmp")
+	m := New(local, local, "/home/user", "/tmp", nil)
 
 	// Before a size is known, View shows a placeholder rather than panicking.
 	if got := m.View(); got != "loading…" {

@@ -14,7 +14,7 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(missing) error: %v", err)
 	}
-	want := File{PasswordFallback: true}
+	want := File{PasswordFallback: true, Exclude: []string{".venv", "__pycache__"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load(missing) = %+v, want %+v", got, want)
 	}
@@ -27,6 +27,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		DefaultUser:      "me",
 		DefaultPort:      2222,
 		PasswordFallback: false,
+		Exclude:          []string{"node_modules", "*.tmp"}, // a non-default list survives the round trip
 	}
 	if err := in.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -54,6 +55,7 @@ func TestSaveLoadRoundTripWithHosts(t *testing.T) {
 	in := File{
 		DefaultUser:      "me",
 		PasswordFallback: true,
+		Exclude:          []string{".venv", "__pycache__"},
 		Hosts: map[string]Host{
 			"prod": {
 				User:      "admin",
@@ -140,6 +142,7 @@ func TestRunSetupEditDefaults(t *testing.T) {
 		DefaultUser:      "alice",
 		DefaultPort:      2222,
 		PasswordFallback: false,
+		Exclude:          []string{".venv", "__pycache__"}, // inherited default, persisted on save
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("setup wrote %+v, want %+v", got, want)
@@ -161,7 +164,7 @@ func TestRunSetupBlankInputKeepsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := File{PasswordFallback: true} // defaults: nothing set, password on
+	want := File{PasswordFallback: true, Exclude: []string{".venv", "__pycache__"}} // defaults: nothing set, password on
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("setup wrote %+v, want defaults %+v", got, want)
 	}

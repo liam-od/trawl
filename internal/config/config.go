@@ -21,11 +21,16 @@ import (
 // set" and let the built-in default apply during the CLI merge. PasswordFallback
 // defaults to true (see Load), since password auth is offered unless disabled.
 type File struct {
-	KeyPath          string          `json:"key_path,omitempty"`
-	DefaultUser      string          `json:"default_user,omitempty"`
-	DefaultPort      int             `json:"default_port,omitempty"`
-	PasswordFallback bool            `json:"password_fallback"`
-	Hosts            map[string]Host `json:"hosts,omitempty"`
+	KeyPath          string `json:"key_path,omitempty"`
+	DefaultUser      string `json:"default_user,omitempty"`
+	DefaultPort      int    `json:"default_port,omitempty"`
+	PasswordFallback bool   `json:"password_fallback"`
+	// Exclude lists base-name glob patterns (path.Match syntax) pruned from
+	// directory transfers, in the TUI and headless alike. A matching directory is
+	// skipped whole, never descended into. It defaults to the patterns in
+	// defaults(); set it to [] in the file to copy everything.
+	Exclude []string        `json:"exclude,omitempty"`
+	Hosts   map[string]Host `json:"hosts,omitempty"`
 }
 
 // Host is a saved connection, addressable by the name it is keyed under in
@@ -50,9 +55,14 @@ func (f File) Host(name string) (Host, bool) {
 
 // defaults returns the File used when no config file exists yet, and the seed
 // for unmarshalling an existing one. PasswordFallback is true so that an absent
-// file — or one that omits the key — leaves password auth enabled.
+// file — or one that omits the key — leaves password auth enabled. Exclude seeds
+// the transfer skip-list; a file that omits "exclude" inherits it, while one
+// that sets "exclude" (including to []) replaces it wholesale.
 func defaults() File {
-	return File{PasswordFallback: true}
+	return File{
+		PasswordFallback: true,
+		Exclude:          []string{".venv", "__pycache__"},
+	}
 }
 
 // DefaultPath returns ${XDG_CONFIG_HOME:-~/.config}/trawl/config.json.

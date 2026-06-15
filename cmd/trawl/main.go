@@ -154,7 +154,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	cfg.KnownHostsPath = expandHome(*knownHosts)
 	cfg.HostKeyPrompt = hostKeyPrompt
 
-	if err := connectAndServe(target, cfg, localStart); err != nil {
+	if err := connectAndServe(target, cfg, localStart, fileCfg.Exclude); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -243,7 +243,7 @@ func mergeSettings(target sshx.Target, fileCfg config.File, f cliFlags) (sshx.Ta
 // connectAndServe opens the SSH/SFTP session and runs the TUI until the user
 // quits or a termination signal arrives, tearing the session down in order. An
 // empty localStart defaults to the current working directory.
-func connectAndServe(target sshx.Target, cfg sshx.Config, localStart string) error {
+func connectAndServe(target sshx.Target, cfg sshx.Config, localStart string, exclude []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -272,7 +272,7 @@ func connectAndServe(target sshx.Target, cfg sshx.Config, localStart string) err
 		remoteStart = expandRemoteHome(remoteStart, remoteHome)
 	}
 
-	model := ui.New(fs.NewLocal(), fs.NewSFTP(sess.SFTP), localStart, remoteStart)
+	model := ui.New(fs.NewLocal(), fs.NewSFTP(sess.SFTP), localStart, remoteStart, exclude)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	// A termination signal quits the program so the deferred session teardown
@@ -328,7 +328,7 @@ func runTransfer(specJSON, configPath, knownHosts string, flags cliFlags, stdout
 	cfg.KnownHostsPath = expandHome(knownHosts)
 	cfg.HostKeyPrompt = hostKeyPrompt
 
-	if err := connectAndTransfer(target, cfg, spec, localStart, stdout, stderr); err != nil {
+	if err := connectAndTransfer(target, cfg, spec, localStart, fileCfg.Exclude, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -341,7 +341,7 @@ func runTransfer(specJSON, configPath, knownHosts string, flags cliFlags, stdout
 // unless the spec overrides it, with a leading ~ expanded against the server home
 // known only after connecting; the local base is the host's local_dir unless
 // overridden. The destination's parent directory is created if missing.
-func connectAndTransfer(target sshx.Target, cfg sshx.Config, spec job.Spec, localStart string, stdout, stderr io.Writer) error {
+func connectAndTransfer(target sshx.Target, cfg sshx.Config, spec job.Spec, localStart string, exclude []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -376,7 +376,7 @@ func connectAndTransfer(target sshx.Target, cfg sshx.Config, spec job.Spec, loca
 		return fmt.Errorf("create destination dir: %w", err)
 	}
 
-	return runCopy(ctx, src, srcPath, dst, dstPath, name, stdout, stderr)
+	return runCopy(ctx, src, srcPath, dst, dstPath, name, exclude, stdout, stderr)
 }
 
 // resolveRemoteBase picks the remote base directory for a headless operation:
@@ -547,10 +547,10 @@ func runSort(specJSON string, stdout, stderr io.Writer) int {
 // stderr when it is a terminal and otherwise staying silent until the end. A
 // successful transfer prints one summary line to stdout; an error is returned
 // for the caller to report.
-func runCopy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath, name string, stdout, stderr io.Writer) error {
+func runCopy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath, name string, exclude []string, stdout, stderr io.Writer) error {
 	progress := make(chan transfer.CopyProgressMsg, 64)
 	result := make(chan error, 1)
-	go func() { result <- transfer.Copy(ctx, src, srcPath, dst, dstPath, progress) }()
+	go func() { result <- transfer.Copy(ctx, src, srcPath, dst, dstPath, exclude, progress) }()
 
 	tty := isTerminal(stderr)
 	meter := newRateMeter()

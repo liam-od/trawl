@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -74,6 +75,10 @@ func (s *sftpFS) Walk(root string, fn WalkFunc) error {
 			continue
 		}
 		if ferr := fn(rel, entryFromInfo(w.Stat()), nil); ferr != nil {
+			if errors.Is(ferr, SkipDir) {
+				w.SkipDir() // prune this subtree, keep walking siblings
+				continue
+			}
 			return ferr
 		}
 	}

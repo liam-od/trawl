@@ -29,10 +29,11 @@ func (m *Model) startNext() tea.Cmd {
 	m.lastRateSample = time.Now()
 
 	src, srcPath, dst, dstPath := it.srcFS, it.srcPath, it.dstFS, it.dstPath
+	exclude := m.exclude
 	go func() {
 		// No mid-copy cancel binding yet; Ctrl+C tears the program down and the
 		// goroutine exits with it. transfer.Copy recurses when srcPath is a dir.
-		result <- transfer.Copy(context.Background(), src, srcPath, dst, dstPath, progress)
+		result <- transfer.Copy(context.Background(), src, srcPath, dst, dstPath, exclude, progress)
 	}()
 
 	return waitForCopy(progress, result)

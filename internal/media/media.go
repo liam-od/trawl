@@ -70,7 +70,7 @@ func move(ctx context.Context, srcAbs, dstAbs string) error {
 	// Cross-device: copy the tree, then drop the source only once the copy
 	// succeeded, so a failed copy leaves the inbox untouched.
 	local := fs.NewLocal()
-	if err := transfer.Copy(ctx, local, srcAbs, local, dstAbs, nil); err != nil {
+	if err := transfer.Copy(ctx, local, srcAbs, local, dstAbs, nil, nil); err != nil {
 		return fmt.Errorf("copy %s: %w", srcAbs, err)
 	}
 	if err := os.RemoveAll(srcAbs); err != nil {

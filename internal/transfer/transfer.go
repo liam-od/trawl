@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	iofs "io/fs"
+	"path"
 	"strings"
 
 	"github.com/pkg/sftp"
@@ -28,11 +30,13 @@ type CopyDoneMsg struct {
 }
 
 // Copy transfers srcPath on src to dstPath on dst, recursing if srcPath is a
-// directory (dstPath is then the destination directory to create). It reports
-// CopyProgressMsg values on progress with non-blocking sends (progress may be
-// nil) and aborts if ctx is cancelled. On error a partial destination may
-// remain — atomic writes are deferred until post-v1.
-func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath string, progress chan<- CopyProgressMsg) error {
+// directory (dstPath is then the destination directory to create). exclude lists
+// base-name globs (path.Match syntax) pruned from a directory walk — a matching
+// directory is skipped whole — and does not apply to an explicitly named single
+// file. It reports CopyProgressMsg values on progress with non-blocking sends
+// (progress may be nil) and aborts if ctx is cancelled. On error a partial
+// destination may remain — atomic writes are deferred until post-v1.
+func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath string, exclude []string, progress chan<- CopyProgressMsg) error {
 	info, err := src.Stat(srcPath)
 	if err != nil {
 		return fmt.Errorf("stat source: %w", err)
@@ -40,21 +44,44 @@ func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath str
 
 	c := &counter{ctx: ctx, progress: progress}
 	if info.IsDir {
-		return copyTree(c, src, srcPath, dst, dstPath)
+		return copyTree(c, src, srcPath, dst, dstPath, excluder(exclude))
 	}
 	c.total = info.Size
 	return copyFile(c, src, srcPath, dst, dstPath)
+}
+
+// excluder compiles base-name glob patterns into a predicate reporting whether
+// an entry name should be skipped. A malformed pattern (path.ErrBadPattern)
+// simply never matches, so a typo can't abort a transfer.
+func excluder(patterns []string) func(name string) bool {
+	return func(name string) bool {
+		for _, p := range patterns {
+			if ok, _ := path.Match(p, name); ok {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // copyTree copies the directory rooted at srcRoot into dstRoot, creating dstRoot
 // and mirroring the tree. It walks twice: once to total the bytes (so progress
 // has a denominator), then once to create directories and copy files. The
 // counter accumulates across every file so progress is cumulative for the tree.
-func copyTree(c *counter, src fs.FS, srcRoot string, dst fs.FS, dstRoot string) error {
+func copyTree(c *counter, src fs.FS, srcRoot string, dst fs.FS, dstRoot string, skip func(name string) bool) error {
 	var total int64
-	if err := src.Walk(srcRoot, func(_ string, e fs.Entry, err error) error {
+	if err := src.Walk(srcRoot, func(rel string, e fs.Entry, err error) error {
 		if err != nil {
 			return err
+		}
+		if rel != "" && skip(e.Name) {
+			if e.IsDir {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if e.Mode&iofs.ModeSymlink != 0 {
+			return nil // symlinks aren't streamable; skip rather than deref
 		}
 		if !e.IsDir {
 			total += e.Size
@@ -69,6 +96,15 @@ func copyTree(c *counter, src fs.FS, srcRoot string, dst fs.FS, dstRoot string) 
 	return src.Walk(srcRoot, func(rel string, e fs.Entry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walk %s: %w", srcRoot, err)
+		}
+		if rel != "" && skip(e.Name) {
+			if e.IsDir {
+				return fs.SkipDir // prune to match the scan pass, so totals agree
+			}
+			return nil
+		}
+		if e.Mode&iofs.ModeSymlink != 0 {
+			return nil // skip, matching the scan pass
 		}
 		destPath := joinRel(dst, dstRoot, rel)
 		if e.IsDir {
