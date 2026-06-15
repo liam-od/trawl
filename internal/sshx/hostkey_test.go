@@ -3,9 +3,11 @@ package sshx
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -141,4 +143,46 @@ func TestLoadHostKeyCallback_EmptyPath(t *testing.T) {
 	if _, err := loadHostKeyCallback("", nil); err == nil {
 		t.Error("empty known_hosts path should error")
 	}
+}
+
+func TestHostKeyAlgorithms_DerivesFromKnownHosts(t *testing.T) {
+	host := "example.com:22"
+	path := writeKnownHosts(t, t.TempDir(), host, genHostKey(t)) // ed25519
+
+	got := hostKeyAlgorithms(path, host)
+	if want := []string{ssh.KeyAlgoED25519}; !slices.Equal(got, want) {
+		t.Errorf("hostKeyAlgorithms = %v, want %v", got, want)
+	}
+}
+
+func TestHostKeyAlgorithms_RSAExpandsToSHA2(t *testing.T) {
+	host := "rsa.example.com:22"
+	path := writeKnownHosts(t, t.TempDir(), host, genRSAHostKey(t))
+
+	got := hostKeyAlgorithms(path, host)
+	want := []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	if !slices.Equal(got, want) {
+		t.Errorf("hostKeyAlgorithms = %v, want %v", got, want)
+	}
+}
+
+func TestHostKeyAlgorithms_UnknownHostIsNil(t *testing.T) {
+	path := writeKnownHosts(t, t.TempDir(), "known.example:22", genHostKey(t))
+
+	if got := hostKeyAlgorithms(path, "stranger.example:22"); got != nil {
+		t.Errorf("unknown host should yield nil algorithms, got %v", got)
+	}
+}
+
+func genRSAHostKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	return signer.PublicKey()
 }

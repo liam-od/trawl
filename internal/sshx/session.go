@@ -49,6 +49,10 @@ func Connect(ctx context.Context, t Target, cfg Config) (*Session, error) {
 		User:            t.User,
 		Auth:            methods,
 		HostKeyCallback: hostKeyCB,
+		// Constrain negotiation to host-key types this user already trusts for
+		// the target, so we verify the same key OpenSSH would instead of Go's
+		// default pick. Nil for an unknown host: defaults apply and TOFU runs.
+		HostKeyAlgorithms: hostKeyAlgorithms(cfg.KnownHostsPath, addr),
 	}
 	cConn, chans, reqs, err := ssh.NewClientConn(rawConn, addr, clientCfg)
 	if err != nil {
