@@ -59,7 +59,7 @@ func (localFS) Stat(path string) (Entry, error) {
 }
 
 func (localFS) MkdirAll(path string) error {
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	if err := os.MkdirAll(path, 0o775); err != nil {
 		return fmt.Errorf("mkdir %s: %w", path, err)
 	}
 	return nil

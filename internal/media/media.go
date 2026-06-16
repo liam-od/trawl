@@ -50,7 +50,7 @@ func Sort(ctx context.Context, inbox, library string, moves []job.Move) []Result
 // mount) rename fails with EXDEV, so it falls back to a copy followed by removing
 // the source — a non-atomic move, but the only option across a device boundary.
 func move(ctx context.Context, srcAbs, dstAbs string) error {
-	if err := os.MkdirAll(filepath.Dir(dstAbs), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dstAbs), 0o775); err != nil {
 		return fmt.Errorf("create destination dir: %w", err)
 	}
 	switch _, err := os.Lstat(dstAbs); {
