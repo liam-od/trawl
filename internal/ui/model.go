@@ -61,6 +61,11 @@ type Model struct {
 	copyProgress chan transfer.CopyProgressMsg
 	copyResult   chan error
 
+	// pendingRename, when non-nil, is a copy paused on a yes/no dialog: the
+	// selected name is illegal on the destination filesystem and the queued
+	// item carries the cleaned replacement awaiting the user's confirmation.
+	pendingRename *renameConfirm
+
 	// Transfer-rate state for the active transfer, EMA-smoothed over real time.
 	rateEMA        float64   // bytes/sec, 0 until the first sample
 	lastRateBytes  int64     // cumulative bytes at the last rate sample
@@ -188,9 +193,21 @@ func (m *Model) applyDirLoaded(msg dirLoadedMsg) {
 	// is owned by the actions that set it (errors, copy results).
 }
 
+// renameConfirm is a copy waiting on the rename dialog. item already holds the
+// cleaned destination name and path; origName is the source name it replaces,
+// shown alongside it in the dialog.
+type renameConfirm struct {
+	item     *queueItem
+	origName string
+}
+
 // handleKey maps a keypress to navigation of the active panel. Directory reads
 // are returned as commands rather than performed inline.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.pendingRename != nil {
+		return m.handleRenameKey(msg)
+	}
+
 	active := m.panelFor(m.activePane)
 	activeFS := m.fsFor(m.activePane)
 	entryH := m.entryAreaHeight()
@@ -242,22 +259,53 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// transfer.Copy recurses when the source is a directory.
 		dstPane := 1 - m.activePane
 		dstFS := m.fsFor(dstPane)
-		m.queue.enqueue(&queueItem{
-			name:    e.Name,
+		dstName := dstFS.CleanName(e.Name)
+		it := &queueItem{
+			name:    dstName,
 			srcFS:   activeFS,
 			srcPath: activeFS.Join(active.path, e.Name),
 			dstFS:   dstFS,
-			dstPath: dstFS.Join(m.panelFor(dstPane).path, e.Name),
+			dstPath: dstFS.Join(m.panelFor(dstPane).path, dstName),
 			dstPane: dstPane,
-		})
-		m.queue.visible = true
-		if m.queue.active() == nil {
-			cmd := m.startNext()
-			return m, cmd
 		}
-		m.status = "queued " + e.Name
-		return m, nil
+		if dstName != e.Name {
+			// The destination can't take the name as-is; hold the copy until
+			// the user accepts the cleaned name or cancels.
+			m.pendingRename = &renameConfirm{item: it, origName: e.Name}
+			return m, nil
+		}
+		return m.enqueueCopy(it)
 	}
+	return m, nil
+}
+
+// handleRenameKey drives the rename dialog: y/enter queues the copy under the
+// cleaned name, n/esc discards it. Other keys are ignored so a stray press
+// can't dismiss the dialog — except ctrl+c, which still quits.
+func (m Model) handleRenameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "y", "Y", "enter":
+		it := m.pendingRename.item
+		m.pendingRename = nil
+		return m.enqueueCopy(it)
+	case "n", "N", "esc":
+		m.status = "copy cancelled: " + m.pendingRename.origName
+		m.pendingRename = nil
+	}
+	return m, nil
+}
+
+// enqueueCopy adds it to the queue, reveals the queue panel, and starts the
+// transfer immediately when none is running.
+func (m Model) enqueueCopy(it *queueItem) (tea.Model, tea.Cmd) {
+	m.queue.enqueue(it)
+	m.queue.visible = true
+	if m.queue.active() == nil {
+		return m, m.startNext()
+	}
+	m.status = "queued " + it.name
 	return m, nil
 }
 

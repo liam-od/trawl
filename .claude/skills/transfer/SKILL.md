@@ -6,6 +6,7 @@ description: Download or upload a file with trawl. Generates the transfer spec, 
 # /transfer
 
 The user wants to move a file with trawl. Request: `$ARGUMENTS`
+You have access to the `trawl` binary on the current path.
 
 Every `trawl` invocation is preceded by a snitch `validate` call on the same JSON.
 That rule holds for **both** the list spec and the transfer spec — never run
@@ -67,8 +68,14 @@ validate again until valid. Do not run `trawl --transfer` until it validates.
 
 ## 4. Run the transfer
 
-Run `trawl --transfer '<validated-json>'`. On success, report trawl's `done:`
-line. On a non-zero exit, surface trawl's `error:` line verbatim.
+Run `trawl --transfer '<validated-json>'` with the Bash `run_in_background: true`
+flag. Transfers can run for many minutes — longer than the foreground Bash
+timeout — so they must be backgrounded. The harness notifies you when the
+command exits; do not poll on a timer. (Read the task's output file only if the
+user asks for mid-transfer progress.)
+
+When the command exits, report trawl's `done:` line on success. On a non-zero
+exit, surface trawl's `error:` line verbatim.
 
 (`validate` is an early advisory check with clear field errors; `trawl` itself
 re-validates the spec as the hard gate — advise, then enforce.)

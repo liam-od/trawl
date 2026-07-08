@@ -65,16 +65,34 @@ Classify by the filename, then build a destination **relative to the library**.
 An item is an episode if its name contains a season/episode marker: `S01E02`,
 `s01e02`, `1x02`, or a season pack like `S01` / `Season 1`.
 
+How it's filed depends on whether the inbox item is a **loose episode file** or a
+**season-pack directory** — the destination differs, so check first.
+
+- **Show.Name** (used in both cases) is dotted, matching the library style:
+  `Example.Show`, `Another.Show`. If the show already exists in the library,
+  reuse that exact folder name — do not coin a new spelling.
+- A **season folder** is named `<Show.Name>.Sxx` (two-digit season). If a matching
+  one already exists (even one carrying extra tags after the season number, e.g.
+  `Example.Show.S04.extra.tags`), reuse it exactly. Only mint a new
+  `<Show.Name>.Sxx` when that season has no folder yet.
+- The **original name is never renamed** — files and directories keep their full
+  original name.
+
+**Loose episode file** (a single `.mkv` etc.):
+
 Destination: `Shows/<Show.Name>/<Season.Folder>/<original name kept verbatim>`
 
-- **Show.Name** is dotted, matching the library style: `Example.Show`,
-  `Another.Show`. If the show already exists in the library, reuse that exact
-  folder name — do not coin a new spelling.
-- **Season.Folder** is `<Show.Name>.Sxx` (two-digit season). If a matching season
-  folder already exists (even one carrying extra tags after the season number,
-  e.g. `Example.Show.S04.extra.tags`), reuse it exactly. Only mint a new
-  `<Show.Name>.Sxx` when that season has no folder yet.
-- The **episode filename is never renamed** — it keeps its full original name.
+**Season-pack directory** (a release *directory* already named with the season,
+e.g. `Example.Show.S01.1080p.Web-DL`):
+
+The directory already *is* the season, so it lands directly under the show folder
+and serves as the season folder itself — do **not** wrap it in another
+`<Show.Name>.Sxx` folder (that double-nests).
+
+Destination: `Shows/<Show.Name>/<original directory name kept verbatim>`
+
+(Exception: if a `<Show.Name>.Sxx` season folder for that season *already exists*,
+move the pack's contents into it rather than creating a sibling season variant.)
 
 ### Movie
 
@@ -125,7 +143,7 @@ validate again until valid. Do not run `trawl --sort` until it validates.
 ## 6. Confirm, then run
 
 Show the user the planned moves (src → dest) and get a yes before touching files
-— this writes to their library. On approval, run:
+— this relocates files in their library. On approval, run:
 
 ```
 trawl --sort '<validated-json>'

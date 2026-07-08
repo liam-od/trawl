@@ -47,6 +47,9 @@ func (m Model) entryAreaHeight() int {
 	if m.queueVisible() {
 		h -= m.queuePanelHeight()
 	}
+	if m.pendingRename != nil {
+		h -= renameDialogHeight
+	}
 	if h < 1 {
 		return 1
 	}
@@ -86,6 +89,9 @@ func (m Model) View() string {
 	parts := []string{panels}
 	if m.queueVisible() {
 		parts = append(parts, m.renderQueuePanel())
+	}
+	if m.pendingRename != nil {
+		parts = append(parts, m.renderRenameDialog())
 	}
 	parts = append(parts, m.renderStatus())
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -302,10 +308,37 @@ func clip(s string, width int) string {
 	return string(r[:width-1]) + "…"
 }
 
+// renameDialogHeight is the rename dialog's total rows: three content lines
+// plus the top and bottom border.
+const renameDialogHeight = 5
+
+var dialogBorderStyle = lipgloss.NewStyle().
+	Border(lipgloss.NormalBorder()).
+	BorderForeground(lipgloss.Color("178"))
+
+// renderRenameDialog draws the yes/no prompt shown when the selected name is
+// illegal on the destination filesystem: the original name, the cleaned name
+// the copy would use, and the accept/cancel keys.
+func (m Model) renderRenameDialog() string {
+	innerW := m.width - 2
+	if innerW < 4 {
+		innerW = 4
+	}
+	c := m.pendingRename
+	lines := []string{
+		queueTitleStyle.Width(innerW).Render("Name not allowed on destination — rename and copy?"),
+		clip("  from: "+c.origName, innerW),
+		clip("    to: "+c.item.name, innerW),
+	}
+	return dialogBorderStyle.Width(innerW).Render(strings.Join(lines, "\n"))
+}
+
 func (m Model) renderStatus() string {
 	const hints = "[Tab] switch  [Enter] open  [F5/c] copy  [F7] queue  [Backspace] up  [r] refresh  [q] quit"
 	text := hints
-	if m.status != "" {
+	if m.pendingRename != nil {
+		text = "[y] accept rename  [n] cancel"
+	} else if m.status != "" {
 		text = m.status + "  |  " + hints
 	}
 	return statusStyle.Width(m.width).Render(text)

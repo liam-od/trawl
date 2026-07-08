@@ -365,6 +365,19 @@ func connectAndTransfer(target sshx.Target, cfg sshx.Config, spec job.Spec, loca
 	if srcIsRemote {
 		src, srcPath, dst, dstPath = remoteFS, remotePath, localFS, localPath
 		name, dstParent = path.Base(remotePath), filepath.Dir(localPath)
+		// Headless runs can't prompt the way the TUI does, so a destination
+		// name the local filesystem rejects (e.g. ':' on Windows) is renamed
+		// automatically, with a note so the caller knows where the file went.
+		base := filepath.Base(localPath)
+		if clean := localFS.CleanName(base); clean != base {
+			dstPath = filepath.Join(dstParent, clean)
+			name = clean // report the name the file is actually written under
+			warn := ""
+			if _, err := localFS.Stat(dstPath); err == nil {
+				warn = " (overwriting an existing file)"
+			}
+			fmt.Fprintf(stderr, "note: %q is not a legal name on this system; saving as %q%s\n", base, clean, warn)
+		}
 	} else {
 		src, srcPath, dst, dstPath = localFS, localPath, remoteFS, remotePath
 		name, dstParent = filepath.Base(localPath), path.Dir(remotePath)

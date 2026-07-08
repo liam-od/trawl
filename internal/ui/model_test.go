@@ -210,6 +210,63 @@ func TestModelCopyDirectory(t *testing.T) {
 	}
 }
 
+// strictFS wraps an FS with the destination-name rules of a Windows local
+// disk, so the rename dialog can be exercised on any platform.
+type strictFS struct{ fs.FS }
+
+func (strictFS) CleanName(name string) string { return strings.ReplaceAll(name, ":", "_") }
+
+func TestModelCopyRenameDialog(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	want := []byte("resynced deluxe")
+	if err := os.WriteFile(filepath.Join(srcDir, "AC: Black Flag"), want, 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	local := fs.NewLocal()
+	m := New(local, strictFS{local}, srcDir, dstDir, nil)
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = drive(t, m, dirLoadedMsg{pane: paneLocal, path: srcDir, entries: []fs.Entry{{Name: "AC: Black Flag", Size: int64(len(want))}}})
+	m, _ = drive(t, m, dirLoadedMsg{pane: paneRemote, path: dstDir})
+
+	// 'c' on an illegal destination name opens the dialog instead of copying.
+	m, cmd := drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if cmd != nil || m.pendingRename == nil || len(m.queue.items) != 0 {
+		t.Fatalf("expected a pending rename dialog and an empty queue, got dialog=%v queue=%d", m.pendingRename, len(m.queue.items))
+	}
+	if v := m.View(); !strings.Contains(v, "AC_ Black Flag") {
+		t.Error("dialog view should show the cleaned name")
+	}
+
+	// 'n' cancels: nothing queued, dialog gone.
+	m, _ = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.pendingRename != nil || len(m.queue.items) != 0 {
+		t.Fatalf("cancel left dialog=%v queue=%d", m.pendingRename, len(m.queue.items))
+	}
+	if !strings.HasPrefix(m.status, "copy cancelled") {
+		t.Errorf("status = %q, want a cancellation message", m.status)
+	}
+
+	// Reopen and accept: the copy runs under the cleaned name.
+	m, _ = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m, cmd = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if m.pendingRename != nil || m.queue.active() == nil {
+		t.Fatal("accepting the rename should start the transfer")
+	}
+	m = run(t, m, cmd)
+	if m.queue.items[0].status != statusDone {
+		t.Fatalf("transfer not done: %+v", m.queue.items[0])
+	}
+	got, err := os.ReadFile(filepath.Join(dstDir, "AC_ Black Flag"))
+	if err != nil {
+		t.Fatalf("read renamed copy: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("copied bytes differ from source")
+	}
+}
+
 func TestModelQueueMultiple(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()

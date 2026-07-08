@@ -86,3 +86,7 @@ func (s *sftpFS) Walk(root string, fn WalkFunc) error {
 }
 
 func (s *sftpFS) Join(elem ...string) string { return path.Join(elem...) }
+
+// CleanName is the identity for SFTP: the protocol places no restrictions on
+// names beyond what the remote POSIX filesystem already enforced.
+func (s *sftpFS) CleanName(name string) string { return name }

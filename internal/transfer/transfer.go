@@ -36,6 +36,10 @@ type CopyDoneMsg struct {
 // file. It reports CopyProgressMsg values on progress with non-blocking sends
 // (progress may be nil) and aborts if ctx is cancelled. On error a partial
 // destination may remain — atomic writes are deferred until post-v1.
+//
+// dstPath is used exactly as given — callers pick (and confirm) the top-level
+// name — but nested entries of a tree pass through dst.CleanName so names the
+// destination filesystem rejects are rewritten rather than failing the copy.
 func Copy(ctx context.Context, src fs.FS, srcPath string, dst fs.FS, dstPath string, exclude []string, progress chan<- CopyProgressMsg) error {
 	info, err := src.Stat(srcPath)
 	if err != nil {
@@ -93,6 +97,7 @@ func copyTree(c *counter, src fs.FS, srcRoot string, dst fs.FS, dstRoot string, 
 	c.total = total
 	c.report() // publish the total before any bytes move
 
+	nc := newNameCleaner(dst, dstRoot)
 	return src.Walk(srcRoot, func(rel string, e fs.Entry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walk %s: %w", srcRoot, err)
@@ -106,7 +111,7 @@ func copyTree(c *counter, src fs.FS, srcRoot string, dst fs.FS, dstRoot string, 
 		if e.Mode&iofs.ModeSymlink != 0 {
 			return nil // skip, matching the scan pass
 		}
-		destPath := joinRel(dst, dstRoot, rel)
+		destPath := nc.dest(rel)
 		if e.IsDir {
 			return dst.MkdirAll(destPath)
 		}
@@ -121,6 +126,63 @@ func joinRel(fsys fs.FS, root, rel string) string {
 		return root
 	}
 	return fsys.Join(append([]string{root}, strings.Split(rel, "/")...)...)
+}
+
+// nameCleaner is joinRel for destination paths: every component of a source-
+// relative path passes through fsys.CleanName, so entries legal on the source
+// filesystem land under names the destination accepts (e.g. a ':' in a name
+// downloaded to Windows). Cleaning is silent — callers confirm the top-level
+// name with the user before the copy starts, but aborting a tree mid-transfer
+// over one nested name would be worse than renaming it.
+//
+// Cleaning can collapse two distinct source names in the same directory to one
+// legal name ("ep:1" and "ep?1" both clean to "ep_1" on Windows). Left alone the
+// second entry would silently overwrite the first (or a dir/file collision would
+// abort the copy), so nameCleaner disambiguates: the second claimant of a cleaned
+// name gets a " (2)" suffix. Walk is pre-order, so a renamed directory is
+// recorded before any child resolves its parent, keeping the subtree consistent.
+type nameCleaner struct {
+	fsys     fs.FS
+	assigned map[string]string   // source rel -> chosen destination path
+	taken    map[string]struct{} // destination paths already claimed
+}
+
+func newNameCleaner(fsys fs.FS, root string) *nameCleaner {
+	return &nameCleaner{
+		fsys:     fsys,
+		assigned: map[string]string{"": root},
+		taken:    map[string]struct{}{root: {}},
+	}
+}
+
+// dest returns the destination path for a source-relative path, cleaning every
+// component and disambiguating collisions within a directory.
+func (nc *nameCleaner) dest(rel string) string {
+	if d, ok := nc.assigned[rel]; ok {
+		return d
+	}
+	parentRel, leaf := "", rel
+	if i := strings.LastIndex(rel, "/"); i >= 0 {
+		parentRel, leaf = rel[:i], rel[i+1:]
+	}
+	parent := nc.assigned[parentRel] // recorded first: Walk is pre-order
+	name := nc.fsys.CleanName(leaf)
+	dest := nc.fsys.Join(parent, name)
+	for i := 2; ; i++ {
+		if _, clash := nc.taken[dest]; !clash {
+			break
+		}
+		dest = nc.fsys.Join(parent, disambiguate(name, i))
+	}
+	nc.taken[dest] = struct{}{}
+	nc.assigned[rel] = dest
+	return dest
+}
+
+// disambiguate inserts " (n)" before a name's extension: "ep (2).mkv", "dir (2)".
+func disambiguate(name string, n int) string {
+	ext := path.Ext(name)
+	return fmt.Sprintf("%s (%d)%s", name[:len(name)-len(ext)], n, ext)
 }
 
 // copyFile streams a single regular file, accumulating bytes into c.

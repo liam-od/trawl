@@ -43,6 +43,13 @@ type FS interface {
 	MkdirAll(path string) error
 	Walk(root string, fn WalkFunc) error
 	Join(elem ...string) string
+
+	// CleanName rewrites a single path component into a name this filesystem
+	// accepts, returning it unchanged when it is already legal. It lets a name
+	// that is legal on one side of a transfer (e.g. one containing ':' on a
+	// POSIX server) land on a stricter destination (e.g. Windows local disk).
+	// The result is never empty for a non-empty input.
+	CleanName(name string) string
 }
 
 func entryFromInfo(fi iofs.FileInfo) Entry {

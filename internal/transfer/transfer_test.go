@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pkg/sftp"
@@ -345,4 +346,70 @@ func newTestSFTP(t *testing.T) fs.FS {
 		_ = client.Close()
 	})
 	return fs.NewSFTP(client)
+}
+
+// strictFS wraps an FS with the destination-name rules of a Windows local
+// disk, so name cleaning inside tree copies is testable on any platform.
+type strictFS struct{ fs.FS }
+
+func (strictFS) CleanName(name string) string { return strings.ReplaceAll(name, ":", "_") }
+
+func TestCopyTreeCleansNestedDestinationNames(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	root := filepath.Join(srcDir, "tree")
+	if err := os.MkdirAll(filepath.Join(root, "season: one"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "season: one", "ep: 1.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	local := fs.NewLocal()
+	dstRoot := filepath.Join(dstDir, "tree")
+	if err := transfer.Copy(context.Background(), local, root, strictFS{local}, dstRoot, nil, nil); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dstRoot, "season_ one", "ep_ 1.mkv")); err != nil {
+		t.Errorf("nested entries should land under cleaned names: %v", err)
+	}
+}
+
+// TestCopyTreeDisambiguatesCleanedCollisions covers two sibling entries whose
+// names differ only in an illegal char, so they clean to the same destination
+// name. Neither may be dropped: the second must land under a disambiguated name.
+func TestCopyTreeDisambiguatesCleanedCollisions(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	root := filepath.Join(srcDir, "tree")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// "ep:1.mkv" and "ep_1.mkv" both clean to "ep_1.mkv" under strictFS.
+	if err := os.WriteFile(filepath.Join(root, "ep:1.mkv"), []byte("colon"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ep_1.mkv"), []byte("underscore"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	local := fs.NewLocal()
+	dstRoot := filepath.Join(dstDir, "tree")
+	if err := transfer.Copy(context.Background(), local, root, strictFS{local}, dstRoot, nil, nil); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+
+	// Both source files must survive: one under "ep_1.mkv", one under "ep_1 (2).mkv",
+	// with distinct contents (neither overwritten by the other).
+	got := map[string]bool{}
+	for _, name := range []string{"ep_1.mkv", "ep_1 (2).mkv"} {
+		b, err := os.ReadFile(filepath.Join(dstRoot, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		got[string(b)] = true
+	}
+	if !got["colon"] || !got["underscore"] {
+		t.Errorf("both entries should survive distinctly, got contents %v", got)
+	}
 }
